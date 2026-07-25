@@ -1,0 +1,19 @@
+{
+  "isan_resaka": 900,
+  "latsaky_ny_1000": true,
+  "valin_ia_json_manan_kery": true,
+  "saha_valin_ia": [
+    "reponse",
+    "action",
+    "choix"
+  ],
+  "asa_ekena": [
+    "add_user_progression",
+    "generate_user_cursus",
+    "give_last_user_info",
+    "none"
+  ],
+  "valin_ia_rehetra_misy_safidy": true,
+  "fiteny_ao_amin_ny_resaka": "malagasy",
+  "fanamarihana": "Angona noforonina ho an'ny kinova kely. Tokony mbola hojeren'ny mpampianatra malagasy santionany alohan'ny fampiofanana farany."
+}
