@@ -1,0 +1,11 @@
+{
+  "target_count": 10000,
+  "actual_count": 10000,
+  "exact_duplicate_conversations": 0,
+  "missing_required_fields": 0,
+  "invalid_role_sequences": 0,
+  "minimum_messages": 7,
+  "maximum_messages": 15,
+  "image_placeholder_examples": 284,
+  "note": "Contrôles automatiques uniquement. Une validation humaine par des enseignants malgaches reste nécessaire, notamment pour l'exactitude disciplinaire, le programme national, la qualité du malagasy et la diversité réelle."
+}
