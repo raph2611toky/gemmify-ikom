@@ -1,3 +1,14 @@
+# !pip install -q unsloth trl datasets
+
+#----------------
+# from google.colab import drive
+# drive.mount('/content/drive')
+
+# DATASET_DIR = "/content/drive/MyDrive/gemmify/datasets"
+# import os
+# print(os.listdir(DATASET_DIR))
+
+#----------------
 from unsloth import FastLanguageModel
 import torch
 from trl import SFTTrainer, SFTConfig
@@ -24,6 +35,7 @@ model = FastLanguageModel.get_peft_model(
     random_state = 20260723,
 )
 
+#----------------
 DATA_DIR = "datasets"  
 dataset = load_dataset(
     "json",
@@ -41,6 +53,8 @@ dataset = load_dataset(
 print(dataset)
 print(dataset["train"][0])
 
+#----------------
+#from trl import SFTTrainer, SFTConfig
 def is_text_only(example):
     return example.get("modality", "text") == "text"
 
@@ -93,3 +107,7 @@ trainer = SFTTrainer(
 )
 
 trainer.train()
+
+#----------------
+# model.save_pretrained("/content/drive/MyDrive/gemmify/mpanabe-gemma2b-lora")
+# tokenizer.save_pretrained("/content/drive/MyDrive/gemmify/mpanabe-gemma2b-lora")
