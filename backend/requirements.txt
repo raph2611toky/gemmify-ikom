@@ -6,3 +6,5 @@ python-dotenv==1.1.0
 transformers==5.5.0
 trl==0.24.0
 unsloth==2026.7.5
+rembg
+pillow
