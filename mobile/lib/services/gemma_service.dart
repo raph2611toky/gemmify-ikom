@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -9,24 +10,27 @@ import 'package:flutter_gemma_litertlm/flutter_gemma_litertlm.dart';
 import '../models/ai_tutor_response.dart';
 import '../models/audio_language_mode.dart';
 import 'background_model_download_service.dart';
-import 'learning_tool_service.dart';
 import 'local_learning_database.dart';
-
-class ConversationReplayItem {
-  final bool isUser;
-  final String text;
-
-  const ConversationReplayItem({
-    required this.isUser,
-    required this.text,
-  });
-}
 
 class GenerationCancelledException implements Exception {
   const GenerationCancelledException();
 
   @override
   String toString() => 'GenerationCancelledException';
+}
+
+/// Le fichier du modèle peut être présent sur le téléphone alors que
+/// flutter_gemma a perdu l'identité du modèle actif.
+class ModelNotActiveException implements Exception {
+  const ModelNotActiveException([
+    this.message =
+        'Aucun modèle Gemma actif. Réinstalle ou réactive le modèle local.',
+  ]);
+
+  final String message;
+
+  @override
+  String toString() => message;
 }
 
 class GemmaService {
@@ -41,18 +45,26 @@ class GemmaService {
 
   InferenceModel? _model;
   InferenceChat? _chat;
+  Future<void>? _engineInitFuture;
+  Future<void>? _sessionFuture;
+
   bool _isReady = false;
   bool _installing = false;
-  bool _loading = false;
+  bool _isGenerating = false;
+  bool _supportsImageSession = false;
+  bool _supportsAudioSession = false;
   int _requestSerial = 0;
   int? _activeRequestSerial;
+  int _turnsInSession = 0;
+  int? _boundConversationId;
+  bool _sessionHydrated = false;
 
   bool get isReady => _isReady;
   bool get isInstalling => _installing;
-  bool get isLoading => _loading;
+  bool get isLoading => _sessionFuture != null;
+  bool get isGenerating => _isGenerating;
   bool get supportsImages => _chat?.supportsImages ?? false;
   bool get supportsAudio => _chat?.supportAudio ?? false;
-  bool get hasLiveHistory => _chat?.fullHistory.isNotEmpty ?? false;
   int get currentTokens => _chat?.currentTokens ?? 0;
 
   static const String modelFileName = 'gemma-4-E2B-it.litertlm';
@@ -65,28 +77,14 @@ class GemmaService {
 
   static const int expectedModelBytes = 2588147712;
 
-  static String _directAudioInstructionFor(AudioLanguageMode mode) {
-    switch (mode) {
-      case AudioLanguageMode.malagasy:
-        return 'Henoy mivantana ny feo ary valio amin\'ny teny malagasy, '
-            'mazava sy pedagogika. Aza mampiseho transcription.';
-      case AudioLanguageMode.mixed:
-        return 'Écoute directement le vocal malagasy/français et réponds '
-            'principalement en malagasy, en gardant les termes scolaires '
-            'français utiles. Ne montre aucune transcription.';
-      case AudioLanguageMode.french:
-        return 'Écoute directement le vocal et réponds en français clair et '
-            'pédagogique. Ne montre aucune transcription.';
-    }
-  }
-
-  Future<void> initEngine() async {
-    await FlutterGemma.initialize(
+  Future<void> initEngine() {
+    return _engineInitFuture ??= FlutterGemma.initialize(
       inferenceEngines: [LiteRtLmEngine()],
     );
   }
 
-  Future<ModelDownloadSnapshot> startBackgroundDownload() {
+  Future<ModelDownloadSnapshot> startBackgroundDownload() async {
+    await initEngine();
     return _downloadService.start(
       url: modelUrl,
       fileName: modelFileName,
@@ -94,37 +92,79 @@ class GemmaService {
     );
   }
 
-  Future<ModelDownloadSnapshot> getDownloadState() {
+  Future<ModelDownloadSnapshot> getDownloadState() async {
+    await initEngine();
     return _downloadService.getState();
   }
 
-  Stream<ModelDownloadSnapshot> watchDownload() {
-    return _downloadService.watch();
-  }
+  Stream<ModelDownloadSnapshot> watchDownload() => _downloadService.watch();
 
-  Future<void> cancelDownload() {
-    return _downloadService.cancel();
-  }
+  Future<void> cancelDownload() => _downloadService.cancel();
 
+  /// Vérifie qu'un modèle est réellement utilisable.
+  ///
+  /// `isModelInstalled()` seul ne suffit pas : le fichier peut être présent
+  /// alors qu'aucun modèle n'est défini comme actif dans flutter_gemma.
   Future<bool> isModelAlreadyDownloaded() async {
-    try {
-      return FlutterGemma.hasActiveModel() ||
-          await FlutterGemma.isModelInstalled(modelFileName);
-    } catch (_) {
-      return false;
+    return ensureActiveModelAvailable();
+  }
+
+  /// Répare automatiquement l'identité du modèle actif à partir du fichier
+  /// téléchargé localement, sans relancer un téléchargement de 2,5 Go.
+  Future<bool> ensureActiveModelAvailable() async {
+    await initEngine();
+
+    if (FlutterGemma.hasActiveModel()) {
+      return true;
     }
+
+    try {
+      final snapshot = await _downloadService.getState();
+      final localPath = snapshot.filePath;
+
+      if (snapshot.isCompleted && localPath != null && localPath.isNotEmpty) {
+        final file = File(localPath);
+        if (await file.exists() &&
+            await file.length() == expectedModelBytes) {
+          debugPrint(
+            '🔧 Modèle présent mais inactif : réactivation depuis $localPath',
+          );
+          await installDownloadedModel(localPath);
+          return FlutterGemma.hasActiveModel();
+        }
+      }
+    } catch (error) {
+      debugPrint('Réactivation locale impossible : $error');
+    }
+
+    try {
+      final installed = await FlutterGemma.isModelInstalled(modelFileName);
+      if (installed) {
+        debugPrint(
+          '⚠️ Modèle déclaré installé mais sans identité active exploitable.',
+        );
+      }
+    } catch (_) {}
+
+    return false;
   }
 
   Future<void> installDownloadedModel(String filePath) async {
-    if (_installing) return;
-    _installing = true;
+    await initEngine();
 
+    if (_installing) {
+      while (_installing) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+      if (FlutterGemma.hasActiveModel()) return;
+    }
+
+    _installing = true;
     try {
       final file = File(filePath);
       if (!await file.exists()) {
         throw StateError('Le fichier du modèle est introuvable : $filePath');
       }
-
       final length = await file.length();
       if (length != expectedModelBytes) {
         throw StateError(
@@ -132,390 +172,507 @@ class GemmaService {
         );
       }
 
+      await _chat?.close();
+      _chat = null;
+      await _model?.close();
+      _model = null;
+      _isReady = false;
+      _boundConversationId = null;
+      _sessionHydrated = false;
+
       await FlutterGemma.installModel(
         modelType: ModelType.gemma4,
         fileType: ModelFileType.litertlm,
       ).fromFile(filePath).install();
+
+      if (!FlutterGemma.hasActiveModel()) {
+        throw const ModelNotActiveException(
+          'Le modèle local a été trouvé, mais son activation a échoué.',
+        );
+      }
+
+      debugPrint('✅ Modèle Gemma local installé et défini comme actif.');
     } finally {
       _installing = false;
     }
   }
 
-  Future<void> createSession({bool forceRecreate = false}) async {
-    if (!forceRecreate && _isReady && _chat != null && _model != null) {
+  Future<void> createSession({
+    bool forceRecreate = false,
+    bool supportImage = false,
+    bool supportAudio = false,
+  }) async {
+    await initEngine();
+
+    final activeModelAvailable = await ensureActiveModelAvailable();
+    if (!activeModelAvailable) {
+      throw const ModelNotActiveException();
+    }
+
+    final hasCapabilities =
+        (!supportImage || _supportsImageSession) &&
+        (!supportAudio || _supportsAudioSession);
+    if (!forceRecreate && _isReady && _model != null && hasCapabilities) {
       return;
     }
-    if (_loading) return;
 
-    _loading = true;
-    _isReady = false;
+    final running = _sessionFuture;
+    if (running != null) {
+      await running;
+      if ((!supportImage || _supportsImageSession) &&
+          (!supportAudio || _supportsAudioSession)) {
+        return;
+      }
+    }
 
+    final future = _createSessionInternal(
+      forceRecreate: forceRecreate,
+      supportImage: supportImage,
+      supportAudio: supportAudio,
+    );
+    _sessionFuture = future;
     try {
-      _activeRequestSerial = null;
-      _requestSerial++;
-      await _chat?.stopGeneration();
-      await _chat?.close();
-      _chat = null;
-      await _model?.close();
-      _model = null;
+      await future;
+    } finally {
+      if (identical(_sessionFuture, future)) _sessionFuture = null;
+    }
+  }
 
+  Future<void> _createSessionInternal({
+    required bool forceRecreate,
+    required bool supportImage,
+    required bool supportAudio,
+  }) async {
+    _isReady = false;
+    _activeRequestSerial = null;
+    _requestSerial++;
+
+    if (_isGenerating) {
+      try {
+        await _chat?.stopGeneration();
+      } catch (_) {}
+      _isGenerating = false;
+    }
+
+    final capabilityChanged =
+        supportImage != _supportsImageSession ||
+        supportAudio != _supportsAudioSession;
+
+    await _chat?.close();
+    _chat = null;
+    _boundConversationId = null;
+    _sessionHydrated = false;
+
+    if (_model == null || forceRecreate || capabilityChanged) {
+      await _model?.close();
       _model = await FlutterGemma.getActiveModel(
         maxTokens: 2048,
         preferredBackend: PreferredBackend.cpu,
-        supportImage: true,
-        supportAudio: true,
+        supportImage: supportImage,
+        supportAudio: supportAudio,
         maxNumImages: 1,
       );
-
-      _chat = await _model!.createChat(
-        temperature: 0.25,
-        topK: 20,
-        tokenBuffer: 520,
-        maxOutputTokens: 520,
-        supportImage: true,
-        supportAudio: true,
-        supportsFunctionCalls: true,
-        modelType: ModelType.gemma4,
-        tools: LearningToolService.tools,
-        toolChoice: ToolChoice.auto,
-        systemInstruction: _systemInstruction,
-      );
-
-      if (!(_chat?.supportsImages ?? false)) {
-        throw StateError('La session a été créée sans prise en charge des images.');
-      }
-      if (!(_chat?.supportAudio ?? false)) {
-        throw StateError('La session a été créée sans prise en charge de l’audio.');
-      }
-
-      _isReady = true;
-      debugPrint('🟢 Mpanabe AI prêt : JSON + function calling + progression');
-    } finally {
-      _loading = false;
+      _supportsImageSession = supportImage;
+      _supportsAudioSession = supportAudio;
     }
+
+    await _createChatOnly();
+    _isReady = true;
+    debugPrint(
+      '🟢 Mpanabe AI prêt : texte=${!supportImage && !supportAudio}, '
+      'image=$supportImage, audio=$supportAudio',
+    );
+  }
+
+  Future<void> _createChatOnly() async {
+    final model = _model;
+    if (model == null) {
+      throw StateError('Le modèle Gemma n’est pas chargé.');
+    }
+
+    await _chat?.close();
+    _chat = await model.createChat(
+      temperature: 0.12,
+      topK: 8,
+      tokenBuffer: 280,
+      maxOutputTokens: 150,
+      supportImage: _supportsImageSession,
+      supportAudio: _supportsAudioSession,
+      supportsFunctionCalls: false,
+      modelType: ModelType.gemma4,
+      systemInstruction: _systemInstruction,
+    );
+    _turnsInSession = 0;
+    _sessionHydrated = false;
   }
 
   static const String _systemInstruction = '''
-Tu es Mpanabe AI, tuteur scolaire patient pour les élèves de Madagascar.
-Tu comprends le français, le malagasy et leur mélange. Adapte la difficulté au niveau réellement démontré par l’élève.
+Tu es Mpanabe AI, professeur attentif, patient et clair pour un élève à Madagascar.
+Adapte uniquement les mots, l'exemple et la difficulté au niveau reçu.
 
-PROGRESSION:
-- Quand une réponse d’élève permet une évaluation, appelle save_learning_progress.
-- Quand une leçon est réellement terminée, appelle save_learning_progress avec event_type=lesson_completed, score, max_score, xp et skills.
-- Pour afficher ou adapter une progression antérieure, appelle get_learning_progress.
-- Ne donne jamais une note sans preuve dans la discussion.
-- Après une réponse évaluée, mets à jour score, compréhension et compétences.
-- Affiche ui.card=understanding après un diagnostic, activity_result à la fin d’une activité, progression quand l’élève demande son évolution.
-- Les choix servent à poursuivre l’échange; mets style=button pour les grandes actions et style=chip pour les réponses courtes.
-- Pour type=start_lesson, commence immédiatement l’activité demandée et garde response non vide.
-- Après une explication, propose explicitement les étapes Exercice, Quiz et Jeu éducatif.
-- N’appelle aucun outil de progression avant qu’une réponse de l’élève fournisse une preuve réellement évaluable.
+Retourne uniquement un JSON compact.
+Sans question :
+{"response":"markdown complet","subject":"matière","topic":"sujet","action":"none"}
+Avec choix :
+{"response":"question courte","choices":["choix 1","choix 2"],"subject":"matière","topic":"sujet","action":"wait_answer"}
+Après une vraie réponse évaluée, ajoute le champ optionnel :
+{"evaluation":{"skill":"compétence courte","correct":true}}
 
-SORTIE FINALE OBLIGATOIRE:
-Après les éventuels appels d’outils, renvoie uniquement un objet JSON valide, sans markdown ni texte autour:
-{
-  "response":"texte pédagogique visible",
-  "choices":[{"id":"id","label":"bouton","message":"message envoyé","style":"chip|button"}],
-  "ui":{"card":"none|understanding|activity_result|progression"},
-  "lesson":{"course_id":"","subject":"","topic":"","status":"none|in_progress|completed"},
-  "assessment":{"score":null,"max_score":null,"understanding":0,"xp":0,"level_label":"","current_xp":0,"next_level_xp":0,"streak_days":0,"learning_time":"","skills":[{"id":"","label":"","mastery":0,"status":"mastered|in_progress|discover|reinforce","evidence":""}]},
-  "memory":{"title":"titre court de la discussion","summary":"résumé cumulatif très court"}
-}
-Règles: choices=[] s’il n’y a rien à choisir. Une question pédagogique doit proposer des choices utiles. La clé response est toujours présente. Le résumé memory.summary conserve uniquement les faits utiles des anciens échanges.
+Règles :
+- response : 30 à 55 mots, complète, claire, Markdown simple, aucun antislash visible.
+- Explique une seule idée avec un exemple concret, puis une courte question si utile.
+- Exercice : un seul exercice guidé, 3 choix maximum.
+- Jeu/quiz : exactement 2 petites questions, une seule question affichée à la fois.
+- Dans un jeu, sois dynamique : emoji, numéro de manche et encouragement bref.
+- N'écris jamais « Étape 1 », « Étape 2 » ou « Étape 3 ». Utilise directement les titres « Explication », « Exercice » ou « Jeu et quiz ».
+- Quiz et défi chrono : fournis toujours 2 ou 3 choix dans `choices`.
+- Vrai ou faux : fournis toujours exactement ["Vrai","Faux"].
+- Mémoire : propose une association courte avec 2 ou 3 choix.
+- Après la réponse à la question 1, corrige en une phrase puis donne immédiatement la question 2 avec ses choix.
+- Après la question 2, donne seulement le score final et un encouragement. Ne demande jamais « as-tu compris ? » et ne propose jamais « J’ai compris » dans un jeu.
+- Si la réponse est fausse, corrige simplement et mets correct=false.
+- Si elle est juste, mets correct=true. Les notes, la maîtrise et les points sont calculés localement.
+- Omet choices quand il n'y a aucun choix. Omet evaluation tant qu'aucune réponse n'est évaluée.
+- subject : Mathématiques, Français, Anglais, Sciences ou Autre. topic : chapitre précis.
+- Aucun nom d'étudiant, aucun champ vide, aucun ui, card, lesson, memory ou function_call.
 ''';
 
-  Future<void> restoreConversation(
-    List<ConversationReplayItem> history, {
-    int maxMessages = 8,
-  }) async {
-    final chat = _chat;
-    if (chat == null || history.isEmpty) return;
-    if (chat.fullHistory.isNotEmpty) return;
-
-    final usable = history
-        .where((entry) => entry.text.trim().isNotEmpty)
-        .toList(growable: false);
-    final start = usable.length > maxMessages ? usable.length - maxMessages : 0;
-    final recent = usable.sublist(start);
-    final replay = recent
-        .map(
-          (entry) => Message.text(
-            text: entry.text.trim(),
-            isUser: entry.isUser,
-          ),
-        )
-        .toList(growable: false);
-
-    await chat.clearHistory(replayHistory: replay);
+  static String _audioInstruction(AudioLanguageMode mode) {
+    switch (mode) {
+      case AudioLanguageMode.malagasy:
+        return 'Valio amin’ny teny malagasy. Aza aseho ny transcription.';
+      case AudioLanguageMode.mixed:
+        return 'Réponds naturellement en malagasy ou en français sans transcription.';
+      case AudioLanguageMode.french:
+        return 'Réponds en français clair sans afficher la transcription.';
+    }
   }
 
-  void _ensureRequestActive(int requestSerial) {
-    if (_activeRequestSerial != requestSerial) {
+  void _ensureActive(int serial) {
+    if (_activeRequestSerial != serial) {
       throw const GenerationCancelledException();
     }
+  }
+
+  Future<bool> _ensureChatForConversation(int conversationId) async {
+    if (_chat != null &&
+        _boundConversationId == null &&
+        _turnsInSession == 0) {
+      _boundConversationId = conversationId;
+      _sessionHydrated = false;
+      return true;
+    }
+
+    final mustRebuild = _chat == null ||
+        _boundConversationId != conversationId ||
+        _turnsInSession >= 4 ||
+        currentTokens >= 900;
+
+    if (!mustRebuild) return false;
+
+    await _createChatOnly();
+    _boundConversationId = conversationId;
+    _sessionHydrated = false;
+    debugPrint('♻️ Contexte compact recréé pour la discussion $conversationId');
+    return true;
+  }
+
+  Future<void> activateConversation(int conversationId) async {
+    // La session est changée au prochain envoi pour éviter un travail natif
+    // pendant le simple affichage de la liste des discussions.
   }
 
   Future<AiTutorResponse> sendTutorMessage({
     required int conversationId,
     required String text,
+    LessonState activeLesson = const LessonState(),
+    bool answerCanBeEvaluated = false,
     Uint8List? imageBytes,
     Uint8List? audioBytes,
     AudioLanguageMode languageMode = AudioLanguageMode.mixed,
   }) async {
-    final chat = _chat;
-    if (chat == null) {
-      throw StateError('Session non initialisée. Appelle createSession().');
+    if (_isGenerating) {
+      throw StateError('Une réponse est déjà en cours de génération.');
     }
     if (imageBytes != null && audioBytes != null) {
-      throw ArgumentError('Un seul contenu multimodal par message est autorisé.');
+      throw ArgumentError('Envoie une image ou un audio, pas les deux ensemble.');
     }
 
-    final progressJson =
-        await LocalLearningDatabase.instance.buildCompactProgressJson();
-    final normalizedText = text.trim();
+    final needsImage = imageBytes != null;
+    final needsAudio = audioBytes != null;
+    await createSession(
+      forceRecreate: needsImage && !_supportsImageSession ||
+          needsAudio && !_supportsAudioSession,
+      supportImage: needsImage || _supportsImageSession,
+      supportAudio: needsAudio || _supportsAudioSession,
+    );
+
+    _isGenerating = true;
+    try {
+      final rebuilt = await _ensureChatForConversation(conversationId);
+      final response = await _generateOnce(
+        conversationId: conversationId,
+        text: text,
+        activeLesson: activeLesson,
+        answerCanBeEvaluated: answerCanBeEvaluated,
+        imageBytes: imageBytes,
+        audioBytes: audioBytes,
+        languageMode: languageMode,
+        hydrate: rebuilt || !_sessionHydrated,
+      );
+      return _validateProgress(response, answerCanBeEvaluated);
+    } finally {
+      _isGenerating = false;
+    }
+  }
+
+  Future<AiTutorResponse> _generateOnce({
+    required int conversationId,
+    required String text,
+    required LessonState activeLesson,
+    required bool answerCanBeEvaluated,
+    required AudioLanguageMode languageMode,
+    required bool hydrate,
+    Uint8List? imageBytes,
+    Uint8List? audioBytes,
+  }) async {
+    final isMultimodal = imageBytes != null || audioBytes != null;
+    final context = hydrate
+        ? await LocalLearningDatabase.instance.buildCompactContext(
+            conversationId,
+            recentMessageCount: isMultimodal ? 1 : 2,
+          )
+        : const CompactConversationContext(summary: '', recentTurns: []);
+    final student = await LocalLearningDatabase.instance.buildTutorProfile();
+    final progress = activeLesson.isActive
+        ? await LocalLearningDatabase.instance.buildCompactProgress(
+            subject: activeLesson.subject,
+            topic: activeLesson.topic,
+            limit: 1,
+          )
+        : const <String, dynamic>{};
+
+    final normalizedText = _clip(text, isMultimodal ? 180 : 360);
+    if (normalizedText.isEmpty && imageBytes == null && audioBytes == null) {
+      throw ArgumentError('Le message est vide.');
+    }
+
     final envelope = jsonEncode({
-      'type': audioBytes != null
-          ? 'student_audio'
-          : imageBytes != null
-              ? 'student_image'
-              : 'student_message',
-      'conversation_id': conversationId,
       'message': normalizedText,
-      'audio_instruction': audioBytes == null
-          ? null
-          : _directAudioInstructionFor(languageMode),
-      'known_progress': jsonDecode(progressJson),
+      if (student.isNotEmpty) 'student': student,
+      if (audioBytes != null) 'audio_rule': _audioInstruction(languageMode),
+      if (activeLesson.isActive)
+        'lesson': {
+          'subject': _clip(activeLesson.subject, 30),
+          'topic': _clip(activeLesson.topic, 50),
+          'step': activeLesson.step,
+          'activity': activeLesson.activity,
+          if (activeLesson.step == 3)
+            'game_question': activeLesson.gameQuestion,
+          if (activeLesson.step == 3) 'game_total': activeLesson.gameTotal,
+          if (activeLesson.step == 3)
+            'game_correct': activeLesson.gameCorrect,
+        },
+      'evaluate_answer': answerCanBeEvaluated,
+      if (hydrate && context.summary.isNotEmpty) 'summary': context.summary,
+      if (hydrate && context.recentTurns.isNotEmpty)
+        'recent_same_chat': context.recentTurns,
+      if (progress['skills'] is List &&
+          (progress['skills'] as List).isNotEmpty)
+        'progress': progress,
+      'task': _taskFor(activeLesson, answerCanBeEvaluated),
     });
+
+    final serial = ++_requestSerial;
+    _activeRequestSerial = serial;
+    try {
+      var response = await _runGeneration(
+        serial: serial,
+        envelope: envelope,
+        activeLesson: activeLesson,
+        imageBytes: imageBytes,
+        audioBytes: audioBytes,
+      );
+      final inferredSubject = activeLesson.subject.trim().isNotEmpty
+          ? activeLesson.subject
+          : _inferSubject(normalizedText);
+      final inferredTopic = activeLesson.topic.trim().isNotEmpty
+          ? activeLesson.topic
+          : _inferTopic(normalizedText, inferredSubject);
+      response = response.copyWith(
+        lesson: response.lesson.copyWith(
+          subject: response.lesson.subject.trim().isEmpty
+              ? inferredSubject
+              : response.lesson.subject,
+          topic: response.lesson.topic.trim().isEmpty
+              ? inferredTopic
+              : response.lesson.topic,
+        ),
+      );
+      _sessionHydrated = true;
+      return response;
+    } finally {
+      if (_activeRequestSerial == serial) _activeRequestSerial = null;
+    }
+  }
+
+  Future<AiTutorResponse> _runGeneration({
+    required int serial,
+    required String envelope,
+    required LessonState activeLesson,
+    Uint8List? imageBytes,
+    Uint8List? audioBytes,
+  }) async {
+    final chat = _chat;
+    if (chat == null) throw StateError('La session Gemma est indisponible.');
 
     final Message message;
     if (audioBytes != null && audioBytes.isNotEmpty) {
-      if (!chat.supportAudio) {
-        throw StateError('La session ne prend pas en charge l’audio.');
-      }
       message = Message.withAudio(
         text: envelope,
         audioBytes: audioBytes,
         isUser: true,
       );
     } else if (imageBytes != null && imageBytes.isNotEmpty) {
-      if (!chat.supportsImages) {
-        throw StateError('La session ne prend pas en charge les images.');
-      }
       message = Message.withImages(
         text: envelope,
         imageBytes: [imageBytes],
         isUser: true,
       );
     } else {
-      if (normalizedText.isEmpty) {
-        throw ArgumentError('Le message texte est vide.');
-      }
       message = Message.text(text: envelope, isUser: true);
     }
 
-    final requestSerial = ++_requestSerial;
-    _activeRequestSerial = requestSerial;
+    await chat.addQueryChunk(message, true);
+    _ensureActive(serial);
 
-    try {
-      await chat.addQueryChunk(message);
-      _ensureRequestActive(requestSerial);
-      return await _generateWithTools(
-        conversationId: conversationId,
-        requestSerial: requestSerial,
-      );
-    } finally {
-      if (_activeRequestSerial == requestSerial) {
-        _activeRequestSerial = null;
-      }
+    final buffer = StringBuffer();
+    await for (final item in chat.generateChatResponseAsync()) {
+      _ensureActive(serial);
+      if (item is TextResponse) buffer.write(item.token);
     }
-  }
+    _ensureActive(serial);
+    _turnsInSession++;
 
-  Future<AiTutorResponse> _generateWithTools({
-    required int conversationId,
-    required int requestSerial,
-  }) async {
-    final chat = _chat!;
-    var progressSavedByFunction = false;
-
-    for (var round = 0; round < 3; round++) {
-      _ensureRequestActive(requestSerial);
-      final buffer = StringBuffer();
-      final calls = <FunctionCallResponse>[];
-
-      try {
-        await for (final response in chat.generateChatResponseAsync()) {
-          _ensureRequestActive(requestSerial);
-          if (response is TextResponse) {
-            buffer.write(response.token);
-          } else if (response is FunctionCallResponse) {
-            calls.add(response);
-          } else if (response is ParallelFunctionCallResponse) {
-            calls.addAll(response.calls);
-          }
-        }
-      } catch (_) {
-        _ensureRequestActive(requestSerial);
-        rethrow;
-      }
-
-      _ensureRequestActive(requestSerial);
-
-      if (calls.isEmpty) {
-        final raw = buffer.toString().trim();
-        if (raw.isEmpty) {
-          return const AiTutorResponse(
-            response:
-                'Je n’ai pas reçu de réponse complète du modèle. Appuie sur une option ou reformule en une phrase courte.',
-            choices: [
-              TutorChoice(
-                id: 'retry_explanation',
-                label: 'Réessayer',
-                message: 'Recommence avec une explication très courte.',
-                style: 'button',
-              ),
-            ],
-          );
-        }
-
-        final parsed = AiTutorResponse.parse(raw);
-        await _persistStructuredAssessmentIfNeeded(
-          conversationId: conversationId,
-          response: parsed,
-          alreadySavedByFunction: progressSavedByFunction,
-        );
-        return parsed;
-      }
-
-      for (final call in calls) {
-        _ensureRequestActive(requestSerial);
-        debugPrint('🛠️ Function call: ${call.name} ${call.args}');
-        final arguments = Map<String, dynamic>.from(call.args);
-        final toolResult = await LearningToolService.instance.execute(
-          conversationId: conversationId,
-          name: call.name,
-          arguments: arguments,
-        );
-        _ensureRequestActive(requestSerial);
-        if (call.name == 'save_learning_progress') {
-          progressSavedByFunction = true;
-        }
-        await chat.addQueryChunk(
-          Message.toolResponse(
-            toolName: call.name,
-            response: toolResult,
-          ),
-        );
-      }
-    }
-
-    _ensureRequestActive(requestSerial);
-    return const AiTutorResponse(
-      response:
-          'La progression a été enregistrée. Choisis maintenant la prochaine étape.',
-      choices: [
-        TutorChoice(
-          id: 'continue_explanation',
-          label: 'Continuer la leçon',
-          message: 'Continue la leçon à l’étape suivante.',
-          style: 'button',
-        ),
-        TutorChoice(
-          id: 'start_exercise',
-          label: 'Faire un exercice',
-          message: 'Propose-moi un exercice adapté.',
-          style: 'button',
-        ),
-      ],
+    return AiTutorResponse.parse(buffer.toString()).normalized(
+      fallbackLesson: activeLesson,
+      lessonMode: activeLesson.isActive,
     );
   }
 
-  Future<void> _persistStructuredAssessmentIfNeeded({
-    required int conversationId,
-    required AiTutorResponse response,
-    required bool alreadySavedByFunction,
-  }) async {
-    if (alreadySavedByFunction || response.skills.isEmpty) return;
-
-    final hasEvidence = response.lessonCompleted ||
-        response.score != null ||
-        (response.understanding > 0 &&
-            response.skills.any((skill) => skill.evidence.isNotEmpty));
-    if (!hasEvidence) return;
-
-    // Filet de sécurité : le chemin normal reste le function calling. Cette
-    // écriture évite toutefois de perdre une note structurée si le modèle a
-    // produit le JSON final sans appeler l’outil malgré les instructions.
-    await LocalLearningDatabase.instance.applyProgressFunction(
-      conversationId: conversationId,
-      arguments: {
-        'event_type': response.lessonCompleted
-            ? 'lesson_completed'
-            : 'answer_evaluated',
-        'course_id': response.courseId,
-        'subject': response.subject,
-        'topic': response.topic,
-        if (response.score != null) 'score': response.score,
-        if (response.maxScore != null) 'max_score': response.maxScore,
-        'understanding': response.understanding,
-        'xp': response.xp,
-        'summary': response.summary,
-        'lesson_completed': response.lessonCompleted,
-        'skills': response.skills
-            .map(
-              (skill) => {
-                ...skill.toJson(),
-                'correct': skill.status == 'mastered',
-                'xp': 0,
-              },
-            )
-            .toList(growable: false),
-      },
-    );
-  }
-
-  Future<AiTutorResponse> sendAudioTutorMessage({
-    required int conversationId,
-    required Uint8List audioBytes,
-    required AudioLanguageMode languageMode,
-  }) {
-    if (audioBytes.length <= 44) {
-      throw ArgumentError('Le message vocal est vide ou invalide.');
-    }
-    return sendTutorMessage(
-      conversationId: conversationId,
-      text: _directAudioInstructionFor(languageMode),
-      audioBytes: audioBytes,
-      languageMode: languageMode,
-    );
-  }
-
-  Stream<String> sendMessageStream({
-    required String text,
-    Uint8List? imageBytes,
-    Uint8List? audioBytes,
-  }) async* {
-    final conversationId =
-        await LocalLearningDatabase.instance.getOrCreateActiveConversation();
-    final result = await sendTutorMessage(
-      conversationId: conversationId,
-      text: text,
-      imageBytes: imageBytes,
-      audioBytes: audioBytes,
-    );
-    yield result.response;
+  AiTutorResponse _validateProgress(
+    AiTutorResponse response,
+    bool answerCanBeEvaluated,
+  ) {
+    if (!response.progress.save || answerCanBeEvaluated) return response;
+    return response.copyWith(progress: const ProgressUpdate());
   }
 
   Future<void> stopGeneration() async {
     _activeRequestSerial = null;
     _requestSerial++;
-    await _chat?.stopGeneration();
+    if (!_isGenerating) return;
+    try {
+      await _chat?.stopGeneration();
+    } catch (error) {
+      debugPrint('Arrêt de génération : $error');
+    } finally {
+      _isGenerating = false;
+    }
+  }
+
+  Future<void> resetConversationSession({int? conversationId}) async {
+    if (_isGenerating) await stopGeneration();
+    if (_model == null) {
+      await createSession();
+      return;
+    }
+    await _createChatOnly();
+    _boundConversationId = conversationId;
+    _sessionHydrated = false;
+    _isReady = true;
   }
 
   Future<void> dispose() async {
+    if (_isGenerating) await stopGeneration();
     await _chat?.close();
     _chat = null;
     await _model?.close();
     _model = null;
+    _boundConversationId = null;
     _isReady = false;
+    _supportsImageSession = false;
+    _supportsAudioSession = false;
   }
+}
+
+String _taskFor(LessonState lesson, bool answerExpected) {
+  if (!lesson.isActive) {
+    return 'Identifie la matière et le sujet. Explique clairement comme un professeur attentif. Si la demande est un exercice, crée un exercice; si c’est un jeu ou quiz, limite-le à 2 questions.';
+  }
+  if (lesson.step <= 1) {
+    return answerExpected
+        ? 'Évalue cette réponse. Si elle est correcte, félicite brièvement et demande de passer à l’exercice. Sinon réexplique plus simplement avec une nouvelle petite question.'
+        : 'Explication : explique une idée avec un exemple adapté au niveau, puis pose une seule petite question avec 2 ou 3 choix. N’écris aucun numéro d’étape.';
+  }
+  if (lesson.step == 2) {
+    return answerExpected
+        ? 'Évalue l’exercice. Bonne réponse : félicite et annonce le jeu. Erreur : montre l’erreur puis propose un exercice plus simple.'
+        : 'Exercice : propose un seul exercice guidé avec 3 choix maximum. N’écris aucun numéro d’étape.';
+  }
+  final current = lesson.gameQuestion <= 0 ? 1 : lesson.gameQuestion;
+  final game = switch (lesson.activity.toLowerCase()) {
+    'true_false' || 'truefalse' || 'vrai_faux' =>
+      'Vrai ou faux : une affirmation courte et exactement les choix Vrai/Faux.',
+    'memory' =>
+      'Jeu mémoire : une association courte avec 2 ou 3 choix.',
+    'chrono' =>
+      'Défi chrono : question très courte, ton énergique et 2 ou 3 choix.',
+    _ => 'Quiz rapide : question courte et 2 ou 3 choix.',
+  };
+  return answerExpected
+      ? current >= lesson.gameTotal
+          ? 'Évalue la question finale. Donne un score sur ${lesson.gameTotal}, un encouragement bref et termine. Aucun choix, aucune troisième question, aucune demande de compréhension.'
+          : 'Évalue la question $current sur ${lesson.gameTotal} en une phrase, puis affiche immédiatement la question ${current + 1} sur ${lesson.gameTotal}. $game Ne demande jamais si l’élève a compris.'
+      : 'Jeu et quiz, question $current sur ${lesson.gameTotal}. $game Ajoute un emoji et un titre de manche. Ne propose jamais « J’ai compris » et n’écris aucun numéro d’étape.';
+}
+
+String _clip(String value, int maxLength) {
+  final clean = value.replaceAll(RegExp(r'\s+'), ' ').trim();
+  if (clean.length <= maxLength) return clean;
+  return '${clean.substring(0, maxLength - 1).trimRight()}…';
+}
+
+String _inferSubject(String text) {
+  final value = text.toLowerCase();
+  if (RegExp(r'fraction|calcul|nombre|équation|equation|géométr|geometr|multipli|division')
+      .hasMatch(value)) {
+    return 'Mathématiques';
+  }
+  if (RegExp(r'français|francais|grammaire|conjug|orthographe|rédaction|redaction')
+      .hasMatch(value)) {
+    return 'Français';
+  }
+  if (RegExp(r'anglais|english|vocabulaire anglais|verb in english')
+      .hasMatch(value)) {
+    return 'Anglais';
+  }
+  if (RegExp(r'science|physique|chimie|biologie|svt').hasMatch(value)) {
+    return 'Sciences';
+  }
+  return 'Autre';
+}
+
+String _inferTopic(String text, String subject) {
+  final value = text.toLowerCase();
+  if (value.contains('fraction')) return 'Fractions';
+  if (value.contains('multipli')) return 'Multiplication';
+  if (value.contains('division')) return 'Division';
+  if (value.contains('conjug')) return 'Conjugaison';
+  if (value.contains('grammaire')) return 'Grammaire';
+  if (value.contains('orthographe')) return 'Orthographe';
+  if (value.contains('vocabulaire')) return 'Vocabulaire';
+  if (value.contains('physique')) return 'Physique';
+  if (value.contains('chimie')) return 'Chimie';
+  return subject == 'Autre' ? 'Question générale' : subject;
 }

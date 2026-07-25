@@ -450,6 +450,10 @@ class _ChatInputBarState extends State<ChatInputBar> {
                         decoration: const InputDecoration(
                           hintText: 'Pose ta question...',
                           isDense: true,
+                          filled: false,
+                          border: InputBorder.none,
+                          enabledBorder: InputBorder.none,
+                          focusedBorder: InputBorder.none,
                           contentPadding: EdgeInsets.symmetric(vertical: 11),
                         ),
                         onTap: () {

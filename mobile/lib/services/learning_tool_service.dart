@@ -11,9 +11,10 @@ class LearningToolService {
     Tool(
       name: 'save_learning_progress',
       description:
-          'Enregistre une preuve réelle de progression de l’élève. Appelle cet '
-          'outil après avoir évalué une réponse, observé une compétence ou '
-          'terminé une leçon. Ne l’appelle pas sans preuve dans la discussion.',
+          'Enregistre une preuve réelle de progression de l’élève. Utilise cet '
+          'outil uniquement quand progress_tools_allowed=true et après une '
+          'réponse réellement évaluée. Ne jamais l’appeler pendant le choix ou '
+          'le démarrage d’une leçon.',
       parameters: {
         'type': 'object',
         'properties': {
@@ -60,19 +61,24 @@ class LearningToolService {
                 'xp': {'type': 'integer'},
                 'evidence': {'type': 'string'},
               },
-              'required': ['id', 'label', 'mastery', 'status'],
+              'required': ['id', 'label', 'mastery', 'status', 'evidence'],
             },
           },
         },
-        'required': ['event_type', 'subject', 'topic', 'skills'],
+        'required': [
+          'event_type',
+          'course_id',
+          'subject',
+          'topic',
+          'skills',
+        ],
       },
     ),
     Tool(
       name: 'get_learning_progress',
       description:
           'Lit la progression locale enregistrée afin d’adapter le prochain '
-          'cours, afficher la progression ou éviter de répéter ce qui est déjà '
-          'maîtrisé.',
+          'cours ou afficher les compétences déjà acquises.',
       parameters: {
         'type': 'object',
         'properties': {
@@ -90,7 +96,19 @@ class LearningToolService {
   }) async {
     switch (name) {
       case 'save_learning_progress':
-        final result = await LocalLearningDatabase.instance.applyProgressFunction(
+        final validation = _validateProgressArguments(arguments);
+        if (validation != null) {
+          return {
+            'status': 'rejected',
+            'code': validation.code,
+            'message': validation.message,
+            'instruction':
+                'N’enregistre rien. Renvoie maintenant la réponse JSON pédagogique visible et poursuis la leçon normalement.',
+          };
+        }
+
+        final result =
+            await LocalLearningDatabase.instance.applyProgressFunction(
           conversationId: conversationId,
           arguments: arguments,
         );
@@ -99,6 +117,7 @@ class LearningToolService {
           'conversation_id': conversationId,
           'progress': result,
         };
+
       case 'get_learning_progress':
         final subject = _asString(arguments['subject']);
         final topic = _asString(arguments['topic']);
@@ -110,6 +129,7 @@ class LearningToolService {
           'status': 'ok',
           'progress': result,
         };
+
       default:
         return {
           'status': 'error',
@@ -119,4 +139,106 @@ class LearningToolService {
   }
 }
 
+_ProgressValidationError? _validateProgressArguments(
+  Map<String, dynamic> arguments,
+) {
+  final eventType = _asString(
+    arguments['event_type'] ?? arguments['eventType'],
+  ).toLowerCase();
+  const allowedEvents = {
+    'answer_evaluated',
+    'skill_progress',
+    'lesson_completed',
+  };
+  if (!allowedEvents.contains(eventType)) {
+    return const _ProgressValidationError(
+      'INVALID_EVENT_TYPE',
+      'Le type d’événement de progression est invalide.',
+    );
+  }
+
+  final courseId = _asString(
+    arguments['course_id'] ?? arguments['courseId'],
+  ).toLowerCase();
+  if (courseId.isEmpty ||
+      courseId == 'none' ||
+      courseId == 'null' ||
+      courseId == 'undefined') {
+    return const _ProgressValidationError(
+      'INVALID_COURSE_ID',
+      'Aucun cours réel n’est actif. course_id ne peut pas être vide ou « none ».',
+    );
+  }
+
+  final subject = _asString(arguments['subject']);
+  final topic = _asString(arguments['topic']);
+  if (subject.isEmpty || topic.isEmpty) {
+    return const _ProgressValidationError(
+      'MISSING_LESSON_IDENTITY',
+      'La matière et le thème doivent être connus avant tout enregistrement.',
+    );
+  }
+
+  final rawSkills = arguments['skills'];
+  if (rawSkills is! List || rawSkills.isEmpty) {
+    return const _ProgressValidationError(
+      'MISSING_SKILLS',
+      'Aucune compétence évaluée n’a été fournie.',
+    );
+  }
+
+  var hasEvidence = false;
+  for (final raw in rawSkills) {
+    if (raw is! Map) continue;
+    final skill = Map<String, dynamic>.from(raw);
+    final id = _asString(skill['id'] ?? skill['skill_id']);
+    final label = _asString(skill['label'] ?? skill['name']);
+    final evidence = _asString(skill['evidence'] ?? skill['feedback']);
+    if ((id.isNotEmpty || label.isNotEmpty) && evidence.isNotEmpty) {
+      hasEvidence = true;
+      break;
+    }
+  }
+
+  final score = _asNullableInt(arguments['score']);
+  final maxScore = _asNullableInt(
+    arguments['max_score'] ?? arguments['maxScore'],
+  );
+  final hasValidScore = score != null &&
+      maxScore != null &&
+      maxScore > 0 &&
+      score >= 0 &&
+      score <= maxScore;
+
+  if (!hasEvidence && !hasValidScore) {
+    return const _ProgressValidationError(
+      'MISSING_EVIDENCE',
+      'Une note valide ou une preuve textuelle de compétence est nécessaire.',
+    );
+  }
+
+  if (eventType == 'lesson_completed' && (!hasValidScore || !hasEvidence)) {
+    return const _ProgressValidationError(
+      'LESSON_NOT_COMPLETABLE',
+      'Une leçon ne peut être terminée sans note, barème et preuve de compétence.',
+    );
+  }
+
+  return null;
+}
+
+class _ProgressValidationError {
+  final String code;
+  final String message;
+
+  const _ProgressValidationError(this.code, this.message);
+}
+
 String _asString(dynamic value) => value == null ? '' : '$value'.trim();
+
+int? _asNullableInt(dynamic value) {
+  if (value == null) return null;
+  if (value is int) return value;
+  if (value is double) return value.round();
+  return int.tryParse(_asString(value));
+}

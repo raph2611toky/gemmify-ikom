@@ -1,10 +1,10 @@
 import 'dart:convert';
 
-import 'package:sqflite/sqflite.dart';
-
 import '../models/ai_tutor_response.dart';
 import '../models/audio_language_mode.dart';
 
+/// Message conservé uniquement en mémoire pendant l'exécution de l'application.
+/// Aucune discussion n'est écrite sur le stockage du téléphone.
 class StoredChatMessage {
   final int id;
   final int conversationId;
@@ -27,22 +27,6 @@ class StoredChatMessage {
     required this.languageMode,
     required this.createdAt,
   });
-
-  factory StoredChatMessage.fromMap(Map<String, Object?> map) {
-    return StoredChatMessage(
-      id: map['id'] as int,
-      conversationId: map['conversation_id'] as int,
-      isUser: (map['role'] as String) == 'user',
-      text: (map['text'] as String?) ?? '',
-      structuredJson: map['structured_json'] as String?,
-      modality: (map['modality'] as String?) ?? 'text',
-      audioDurationMs: map['audio_duration_ms'] as int?,
-      languageMode: audioLanguageModeFromStorage(
-        map['language_mode'] as String?,
-      ),
-      createdAt: (map['created_at'] as int?) ?? 0,
-    );
-  }
 }
 
 class StoredConversation {
@@ -53,13 +37,9 @@ class StoredConversation {
   final String courseId;
   final String status;
   final String summary;
-  final int? lastScore;
-  final int? lastMaxScore;
-  final int understanding;
   final int messageCount;
-  final int createdAt;
   final int updatedAt;
-  final int? completedAt;
+  final String preview;
 
   const StoredConversation({
     required this.id,
@@ -69,33 +49,10 @@ class StoredConversation {
     required this.courseId,
     required this.status,
     required this.summary,
-    required this.lastScore,
-    required this.lastMaxScore,
-    required this.understanding,
     required this.messageCount,
-    required this.createdAt,
     required this.updatedAt,
-    required this.completedAt,
+    required this.preview,
   });
-
-  factory StoredConversation.fromMap(Map<String, Object?> map) {
-    return StoredConversation(
-      id: map['id'] as int,
-      title: (map['title'] as String?) ?? 'Nouvelle discussion',
-      subject: (map['subject'] as String?) ?? '',
-      topic: (map['topic'] as String?) ?? '',
-      courseId: (map['course_id'] as String?) ?? '',
-      status: (map['status'] as String?) ?? 'active',
-      summary: (map['summary'] as String?) ?? '',
-      lastScore: map['last_score'] as int?,
-      lastMaxScore: map['last_max_score'] as int?,
-      understanding: (map['understanding'] as int?) ?? 0,
-      messageCount: (map['message_count'] as int?) ?? 0,
-      createdAt: (map['created_at'] as int?) ?? 0,
-      updatedAt: (map['updated_at'] as int?) ?? 0,
-      completedAt: map['completed_at'] as int?,
-    );
-  }
 }
 
 class StoredSkillProgress {
@@ -104,7 +61,6 @@ class StoredSkillProgress {
   final String skillId;
   final String skillLabel;
   final int mastery;
-  final String status;
   final int attempts;
   final int correctAnswers;
   final int xp;
@@ -116,39 +72,11 @@ class StoredSkillProgress {
     required this.skillId,
     required this.skillLabel,
     required this.mastery,
-    required this.status,
     required this.attempts,
     required this.correctAnswers,
     required this.xp,
     required this.updatedAt,
   });
-
-  factory StoredSkillProgress.fromMap(Map<String, Object?> map) {
-    return StoredSkillProgress(
-      subject: (map['subject'] as String?) ?? '',
-      topic: (map['topic'] as String?) ?? '',
-      skillId: (map['skill_id'] as String?) ?? '',
-      skillLabel: (map['skill_label'] as String?) ?? '',
-      mastery: (map['mastery'] as int?) ?? 0,
-      status: (map['status'] as String?) ?? 'discover',
-      attempts: (map['attempts'] as int?) ?? 0,
-      correctAnswers: (map['correct_answers'] as int?) ?? 0,
-      xp: (map['xp'] as int?) ?? 0,
-      updatedAt: (map['updated_at'] as int?) ?? 0,
-    );
-  }
-
-  Map<String, dynamic> toJson() => {
-        'subject': subject,
-        'topic': topic,
-        'skill_id': skillId,
-        'skill_label': skillLabel,
-        'mastery': mastery,
-        'status': status,
-        'attempts': attempts,
-        'correct_answers': correctAnswers,
-        'xp': xp,
-      };
 }
 
 class LearningOverview {
@@ -165,7 +93,7 @@ class LearningOverview {
   });
 
   String get levelLabel {
-    if (totalXp >= 1200) return 'Experte 6';
+    if (totalXp >= 1200) return 'Exploratrice 6';
     if (totalXp >= 800) return 'Exploratrice 5';
     if (totalXp >= 450) return 'Exploratrice 4';
     if (totalXp >= 250) return 'Exploratrice 3';
@@ -181,754 +109,555 @@ class LearningOverview {
     if (totalXp < 1200) return 1200;
     return totalXp + 500;
   }
-
-  Map<String, dynamic> toJson() => {
-        'total_xp': totalXp,
-        'completed_lessons': completedLessons,
-        'average_mastery': averageMastery,
-        'level_label': levelLabel,
-        'next_level_xp': nextLevelXp,
-        'skills': skills.map((item) => item.toJson()).toList(),
-      };
 }
 
+class ProgressSaveResult {
+  final bool saved;
+  final bool positiveEvolution;
+  final int pointsAdded;
+  final int mastery;
+
+  const ProgressSaveResult({
+    required this.saved,
+    required this.positiveEvolution,
+    required this.pointsAdded,
+    required this.mastery,
+  });
+
+  static const none = ProgressSaveResult(
+    saved: false,
+    positiveEvolution: false,
+    pointsAdded: 0,
+    mastery: 0,
+  );
+}
+
+class CompactConversationContext {
+  final String summary;
+  final List<Map<String, String>> recentTurns;
+
+  const CompactConversationContext({
+    required this.summary,
+    required this.recentTurns,
+  });
+}
+
+class _ConversationRecord {
+  _ConversationRecord({
+    required this.id,
+    required this.title,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+
+  final int id;
+  final int createdAt;
+  String title;
+  String subject = '';
+  String topic = '';
+  String courseId = '';
+  String status = 'active';
+  String summary = '';
+  int updatedAt;
+}
+
+/// Stockage volontairement éphémère.
+///
+/// - Aucune base de discussions n'est ouverte au démarrage.
+/// - Les discussions restent disponibles uniquement tant que l'application
+///   reste ouverte.
+/// - Le mode invité n'enregistre aucune progression.
+/// - Le mini-résumé est isolé par identifiant de discussion.
 class LocalLearningDatabase {
   LocalLearningDatabase._();
 
   static final LocalLearningDatabase instance = LocalLearningDatabase._();
 
-  static const int _databaseVersion = 4;
-  Database? _database;
+  final Map<int, _ConversationRecord> _conversationRecords = {};
+  final Map<int, List<StoredChatMessage>> _messagesByConversation = {};
+  final Map<String, StoredSkillProgress> _skillProgress = {};
+  final List<Map<String, Object?>> _completedLessons = [];
+
+  int _conversationSeed = 0;
+  int _messageSeed = 0;
+  int? _activeConversationId;
+  AudioLanguageMode _languageMode = AudioLanguageMode.mixed;
+  Map<String, dynamic>? _localProfile;
+  bool _signedIn = false;
+  bool _guestMode = false;
+  bool _initialized = false;
+
+  bool get isGuestModeSync => _guestMode;
 
   Future<void> initialize() async {
-    await _db;
+    if (_initialized) return;
+    _initialized = true;
+
+    // Les discussions restent en mémoire : aucun accès SQLite n'est effectué
+    // au démarrage. La base persistante séparée sert uniquement aux comptes.
+    clearRuntimeData();
   }
 
-  Future<Database> get _db async {
-    final existing = _database;
-    if (existing != null && existing.isOpen) return existing;
+  void clearRuntimeData() {
+    _conversationRecords.clear();
+    _messagesByConversation.clear();
+    _skillProgress.clear();
+    _completedLessons.clear();
+    _conversationSeed = 0;
+    _messageSeed = 0;
+    _activeConversationId = null;
+    _languageMode = AudioLanguageMode.mixed;
+    _localProfile = null;
+    _signedIn = false;
+    _guestMode = false;
+  }
 
-    final basePath = await getDatabasesPath();
-    final db = await openDatabase(
-      '$basePath/gemmafy_local.db',
-      version: _databaseVersion,
-      onCreate: (database, version) async {
-        await _createSettingsTable(database);
-        await _createConversationTables(database);
-        await _createLearningTables(database);
-      },
-      onUpgrade: (database, oldVersion, newVersion) async {
-        await _createSettingsTable(database);
-        await _createConversationTables(database);
-        await _ensureConversationColumns(database);
-        await _ensureMessageColumns(database);
-        await _createLearningTables(database);
-      },
+  Future<void> enterGuestMode() async {
+    _signedIn = false;
+    _guestMode = true;
+    _localProfile = null;
+    _skillProgress.clear();
+    _completedLessons.clear();
+  }
+
+  Future<void> enterAccountMode() async {
+    _signedIn = true;
+    _guestMode = false;
+  }
+
+  void restoreAccountSession(Map<String, dynamic> profile) {
+    _localProfile = Map<String, dynamic>.from(
+      jsonDecode(jsonEncode(profile)) as Map,
     );
-
-    _database = db;
-    return db;
+    _signedIn = true;
+    _guestMode = false;
   }
 
-  static Future<void> _createSettingsTable(Database database) async {
-    await database.execute('''
-      CREATE TABLE IF NOT EXISTS app_settings (
-        setting_key TEXT PRIMARY KEY,
-        setting_value TEXT NOT NULL
-      )
-    ''');
+  Future<bool> isGuestMode() async => _guestMode;
+
+  Future<void> saveLanguageMode(AudioLanguageMode mode) async {
+    _languageMode = mode;
   }
 
-  static Future<void> _createConversationTables(Database database) async {
-    await database.execute('''
-      CREATE TABLE IF NOT EXISTS conversations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT NOT NULL,
-        subject TEXT NOT NULL DEFAULT '',
-        topic TEXT NOT NULL DEFAULT '',
-        course_id TEXT NOT NULL DEFAULT '',
-        status TEXT NOT NULL DEFAULT 'active',
-        summary TEXT NOT NULL DEFAULT '',
-        last_score INTEGER,
-        last_max_score INTEGER,
-        understanding INTEGER NOT NULL DEFAULT 0,
-        created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL,
-        completed_at INTEGER
-      )
-    ''');
-
-    await database.execute('''
-      CREATE TABLE IF NOT EXISTS chat_messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        conversation_id INTEGER NOT NULL,
-        role TEXT NOT NULL,
-        text TEXT NOT NULL,
-        structured_json TEXT,
-        modality TEXT NOT NULL DEFAULT 'text',
-        audio_duration_ms INTEGER,
-        language_mode TEXT NOT NULL DEFAULT 'mixed',
-        created_at INTEGER NOT NULL
-      )
-    ''');
-
-    await database.execute('''
-      CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation
-      ON chat_messages(conversation_id, id)
-    ''');
-  }
-
-  static Future<void> _createLearningTables(Database database) async {
-    await database.execute('''
-      CREATE TABLE IF NOT EXISTS learning_progress (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        subject TEXT NOT NULL,
-        topic TEXT NOT NULL,
-        skill_id TEXT NOT NULL,
-        skill_label TEXT NOT NULL,
-        mastery INTEGER NOT NULL DEFAULT 0,
-        status TEXT NOT NULL DEFAULT 'discover',
-        attempts INTEGER NOT NULL DEFAULT 0,
-        correct_answers INTEGER NOT NULL DEFAULT 0,
-        xp INTEGER NOT NULL DEFAULT 0,
-        updated_at INTEGER NOT NULL,
-        UNIQUE(subject, topic, skill_id)
-      )
-    ''');
-
-    await database.execute('''
-      CREATE TABLE IF NOT EXISTS progress_events (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        conversation_id INTEGER NOT NULL,
-        course_id TEXT NOT NULL DEFAULT '',
-        event_type TEXT NOT NULL,
-        payload_json TEXT NOT NULL,
-        created_at INTEGER NOT NULL
-      )
-    ''');
-
-    await database.execute('''
-      CREATE TABLE IF NOT EXISTS lesson_attempts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        conversation_id INTEGER NOT NULL,
-        course_id TEXT NOT NULL,
-        subject TEXT NOT NULL,
-        topic TEXT NOT NULL,
-        score INTEGER,
-        max_score INTEGER,
-        xp INTEGER NOT NULL DEFAULT 0,
-        status TEXT NOT NULL DEFAULT 'completed',
-        details_json TEXT NOT NULL DEFAULT '{}',
-        started_at INTEGER NOT NULL,
-        completed_at INTEGER NOT NULL
-      )
-    ''');
-
-    await database.execute('''
-      CREATE INDEX IF NOT EXISTS idx_progress_events_conversation
-      ON progress_events(conversation_id, created_at)
-    ''');
-  }
-
-  static Future<void> _ensureConversationColumns(Database database) async {
-    await _ensureColumn(database, 'conversations', 'subject', "TEXT NOT NULL DEFAULT ''");
-    await _ensureColumn(database, 'conversations', 'topic', "TEXT NOT NULL DEFAULT ''");
-    await _ensureColumn(database, 'conversations', 'course_id', "TEXT NOT NULL DEFAULT ''");
-    await _ensureColumn(database, 'conversations', 'status', "TEXT NOT NULL DEFAULT 'active'");
-    await _ensureColumn(database, 'conversations', 'summary', "TEXT NOT NULL DEFAULT ''");
-    await _ensureColumn(database, 'conversations', 'last_score', 'INTEGER');
-    await _ensureColumn(database, 'conversations', 'last_max_score', 'INTEGER');
-    await _ensureColumn(database, 'conversations', 'understanding', 'INTEGER NOT NULL DEFAULT 0');
-    await _ensureColumn(database, 'conversations', 'completed_at', 'INTEGER');
-  }
-
-  static Future<void> _ensureMessageColumns(Database database) async {
-    await _ensureColumn(database, 'chat_messages', 'structured_json', 'TEXT');
-  }
-
-  static Future<void> _ensureColumn(
-    Database database,
-    String table,
-    String column,
-    String definition,
-  ) async {
-    final columns = await database.rawQuery('PRAGMA table_info($table)');
-    final exists = columns.any((row) => row['name'] == column);
-    if (!exists) {
-      await database.execute('ALTER TABLE $table ADD COLUMN $column $definition');
-    }
-  }
-
-  Future<void> _saveSetting(String key, String value) async {
-    final db = await _db;
-    await db.insert(
-      'app_settings',
-      {'setting_key': key, 'setting_value': value},
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
-  }
-
-  Future<String?> _loadSetting(String key) async {
-    final db = await _db;
-    final rows = await db.query(
-      'app_settings',
-      columns: ['setting_value'],
-      where: 'setting_key = ?',
-      whereArgs: [key],
-      limit: 1,
-    );
-    if (rows.isEmpty) return null;
-    return rows.first['setting_value'] as String?;
-  }
-
-  Future<void> saveLanguageMode(AudioLanguageMode mode) {
-    return _saveSetting('audio_language_mode', mode.storageValue);
-  }
-
-  Future<AudioLanguageMode> loadLanguageMode() async {
-    return audioLanguageModeFromStorage(
-      await _loadSetting('audio_language_mode'),
-    );
-  }
+  Future<AudioLanguageMode> loadLanguageMode() async => _languageMode;
 
   Future<int> getOrCreateActiveConversation() async {
-    final db = await _db;
-    final saved = int.tryParse(
-      (await _loadSetting('active_conversation_id')) ?? '',
-    );
-
-    if (saved != null) {
-      final rows = await db.query(
-        'conversations',
-        columns: ['id'],
-        where: 'id = ?',
-        whereArgs: [saved],
-        limit: 1,
-      );
-      if (rows.isNotEmpty) return saved;
+    final active = _activeConversationId;
+    if (active != null && _conversationRecords.containsKey(active)) {
+      return active;
     }
-
+    final conversations = await listConversations();
+    if (conversations.isNotEmpty) {
+      _activeConversationId = conversations.first.id;
+      return conversations.first.id;
+    }
     return createConversation();
   }
 
   Future<void> setActiveConversation(int conversationId) async {
-    await _saveSetting('active_conversation_id', '$conversationId');
+    if (_conversationRecords.containsKey(conversationId)) {
+      _activeConversationId = conversationId;
+    }
   }
 
   Future<int> createConversation({String title = 'Nouvelle discussion'}) async {
-    final db = await _db;
     final now = DateTime.now().millisecondsSinceEpoch;
-    final id = await db.insert(
-      'conversations',
-      {
-        'title': title,
-        'created_at': now,
-        'updated_at': now,
-      },
+    final id = ++_conversationSeed;
+    _conversationRecords[id] = _ConversationRecord(
+      id: id,
+      title: title.trim().isEmpty ? 'Nouvelle discussion' : title.trim(),
+      createdAt: now,
+      updatedAt: now,
     );
-    await setActiveConversation(id);
+    _messagesByConversation[id] = <StoredChatMessage>[];
+    _activeConversationId = id;
     return id;
   }
 
   Future<List<StoredConversation>> listConversations() async {
-    final db = await _db;
-    final rows = await db.rawQuery('''
-      SELECT c.*,
-        (SELECT COUNT(*) FROM chat_messages m
-         WHERE m.conversation_id = c.id) AS message_count
-      FROM conversations c
-      ORDER BY c.updated_at DESC
-    ''');
-    return rows.map(StoredConversation.fromMap).toList(growable: false);
+    final values = _conversationRecords.values.map(_toStoredConversation).toList();
+    values.sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    return List.unmodifiable(values);
   }
 
   Future<StoredConversation?> getConversation(int conversationId) async {
-    final db = await _db;
-    final rows = await db.rawQuery('''
-      SELECT c.*,
-        (SELECT COUNT(*) FROM chat_messages m
-         WHERE m.conversation_id = c.id) AS message_count
-      FROM conversations c
-      WHERE c.id = ?
-      LIMIT 1
-    ''', [conversationId]);
-    if (rows.isEmpty) return null;
-    return StoredConversation.fromMap(rows.first);
+    final record = _conversationRecords[conversationId];
+    return record == null ? null : _toStoredConversation(record);
+  }
+
+  StoredConversation _toStoredConversation(_ConversationRecord record) {
+    final messages = _messagesByConversation[record.id] ?? const [];
+    return StoredConversation(
+      id: record.id,
+      title: record.title,
+      subject: record.subject,
+      topic: record.topic,
+      courseId: record.courseId,
+      status: record.status,
+      summary: record.summary,
+      messageCount: messages.length,
+      updatedAt: record.updatedAt,
+      preview: messages.isEmpty ? '' : messages.last.text,
+    );
   }
 
   Future<void> renameConversation(int conversationId, String title) async {
-    final cleanTitle = title.trim();
-    if (cleanTitle.isEmpty) return;
-
-    final db = await _db;
-    await db.update(
-      'conversations',
-      {'title': cleanTitle},
-      where: 'id = ?',
-      whereArgs: [conversationId],
-    );
+    final record = _conversationRecords[conversationId];
+    final clean = title.trim();
+    if (record == null || clean.isEmpty) return;
+    record
+      ..title = _clipInline(clean, 80)
+      ..updatedAt = DateTime.now().millisecondsSinceEpoch;
   }
 
   Future<void> deleteConversation(int conversationId) async {
-    final db = await _db;
-    await db.transaction((transaction) async {
-      await transaction.delete(
-        'chat_messages',
-        where: 'conversation_id = ?',
-        whereArgs: [conversationId],
-      );
-      await transaction.delete(
-        'progress_events',
-        where: 'conversation_id = ?',
-        whereArgs: [conversationId],
-      );
-      await transaction.delete(
-        'lesson_attempts',
-        where: 'conversation_id = ?',
-        whereArgs: [conversationId],
-      );
-      await transaction.delete(
-        'conversations',
-        where: 'id = ?',
-        whereArgs: [conversationId],
-      );
-    });
+    _conversationRecords.remove(conversationId);
+    _messagesByConversation.remove(conversationId);
+    if (_activeConversationId == conversationId) {
+      _activeConversationId = null;
+    }
   }
 
-  Future<List<StoredChatMessage>> loadChatMessages(
+  Future<List<StoredChatMessage>> loadMessages(
     int conversationId, {
-    int limit = 100,
+    int limit = 1000,
   }) async {
-    final db = await _db;
-    final rows = await db.query(
-      'chat_messages',
-      where: 'conversation_id = ?',
-      whereArgs: [conversationId],
-      orderBy: 'id DESC',
-      limit: limit,
-    );
-    return rows.reversed.map(StoredChatMessage.fromMap).toList(growable: false);
+    final values = _messagesByConversation[conversationId] ?? const [];
+    if (values.length <= limit) return List.unmodifiable(values);
+    return List.unmodifiable(values.sublist(values.length - limit));
   }
 
   Future<void> saveExchange({
     required int conversationId,
     required String userText,
     required String userModality,
-    required int? audioDurationMs,
-    required AudioLanguageMode languageMode,
     required AiTutorResponse assistantResponse,
+    int? audioDurationMs,
+    AudioLanguageMode languageMode = AudioLanguageMode.mixed,
   }) async {
-    final db = await _db;
+    final record = _conversationRecords[conversationId];
+    if (record == null) return;
+
     final now = DateTime.now().millisecondsSinceEpoch;
-    final structuredJson = assistantResponse.toJsonString();
+    final compactUser = _clipInline(userText, 900);
+    final assistantText = _clipRaw(assistantResponse.response, 2400);
+    final list = _messagesByConversation.putIfAbsent(
+      conversationId,
+      () => <StoredChatMessage>[],
+    );
 
-    await db.transaction((transaction) async {
-      await transaction.insert(
-        'chat_messages',
-        {
-          'conversation_id': conversationId,
-          'role': 'user',
-          'text': userText,
-          'structured_json': null,
-          'modality': userModality,
-          'audio_duration_ms': audioDurationMs,
-          'language_mode': languageMode.storageValue,
-          'created_at': now,
-        },
-      );
+    list.add(
+      StoredChatMessage(
+        id: ++_messageSeed,
+        conversationId: conversationId,
+        isUser: true,
+        text: compactUser,
+        structuredJson: null,
+        modality: userModality,
+        audioDurationMs: audioDurationMs,
+        languageMode: languageMode,
+        createdAt: now,
+      ),
+    );
+    list.add(
+      StoredChatMessage(
+        id: ++_messageSeed,
+        conversationId: conversationId,
+        isUser: false,
+        text: assistantText,
+        structuredJson: assistantResponse.toCompactJson(),
+        modality: 'text',
+        audioDurationMs: null,
+        languageMode: languageMode,
+        createdAt: now + 1,
+      ),
+    );
 
-      await transaction.insert(
-        'chat_messages',
-        {
-          'conversation_id': conversationId,
-          'role': 'assistant',
-          'text': assistantResponse.response,
-          'structured_json': structuredJson,
-          'modality': 'text',
-          'audio_duration_ms': null,
-          'language_mode': languageMode.storageValue,
-          'created_at': now + 1,
-        },
-      );
+    // Limite de mémoire par discussion, sans toucher aux autres discussions.
+    if (list.length > 80) {
+      list.removeRange(0, list.length - 80);
+    }
 
-      final existingRows = await transaction.query(
-        'conversations',
-        where: 'id = ?',
-        whereArgs: [conversationId],
-        limit: 1,
-      );
-      final existing = existingRows.isEmpty ? null : existingRows.first;
-      final oldTitle = (existing?['title'] as String?) ?? 'Nouvelle discussion';
-      final generatedTitle = assistantResponse.title.trim().isNotEmpty
-          ? assistantResponse.title.trim()
-          : _titleFromMessage(userText);
-
-      await transaction.update(
-        'conversations',
-        {
-          'title': oldTitle == 'Nouvelle discussion' || oldTitle == 'Discussion principale'
-              ? generatedTitle
-              : oldTitle,
-          if (assistantResponse.subject.isNotEmpty)
-            'subject': assistantResponse.subject,
-          if (assistantResponse.topic.isNotEmpty)
-            'topic': assistantResponse.topic,
-          if (assistantResponse.courseId.isNotEmpty)
-            'course_id': assistantResponse.courseId,
-          if (assistantResponse.lessonStatus.isNotEmpty)
-            'status': assistantResponse.lessonStatus,
-          if (assistantResponse.summary.isNotEmpty)
-            'summary': assistantResponse.summary,
-          if (assistantResponse.score != null)
-            'last_score': assistantResponse.score,
-          if (assistantResponse.maxScore != null)
-            'last_max_score': assistantResponse.maxScore,
-          if (assistantResponse.understanding > 0)
-            'understanding': assistantResponse.understanding,
-          if (assistantResponse.lessonCompleted)
-            'completed_at': now + 1,
-          'updated_at': now + 1,
-        },
-        where: 'id = ?',
-        whereArgs: [conversationId],
-      );
-    });
+    final lesson = assistantResponse.lesson;
+    record.updatedAt = now + 1;
+    if (record.title == 'Nouvelle discussion' && compactUser.isNotEmpty) {
+      record.title = _titleFromMessage(compactUser);
+    }
+    if (lesson.subject.trim().isNotEmpty) record.subject = lesson.subject.trim();
+    if (lesson.topic.trim().isNotEmpty) record.topic = lesson.topic.trim();
+    if (lesson.courseId.trim().isNotEmpty) record.courseId = lesson.courseId.trim();
+    record.status = lesson.completed ? 'completed' : 'active';
+    final localSummary = _buildLocalSummary(
+      subject: lesson.subject,
+      topic: lesson.topic,
+      userText: compactUser,
+      assistantText: assistantText,
+    );
+    record.summary = _mergeSummary(record.summary, localSummary);
   }
 
-  Future<Map<String, dynamic>> applyProgressFunction({
-    required int conversationId,
-    required Map<String, dynamic> arguments,
+  Future<CompactConversationContext> buildCompactContext(
+    int conversationId, {
+    int recentMessageCount = 3,
   }) async {
-    final db = await _db;
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final eventType = _string(arguments['event_type'] ?? arguments['eventType']);
-    final courseId = _string(arguments['course_id'] ?? arguments['courseId']);
-    final subject = _string(arguments['subject']).isEmpty
-        ? 'Général'
-        : _string(arguments['subject']);
-    final topic = _string(arguments['topic']).isEmpty
-        ? 'Apprentissage'
-        : _string(arguments['topic']);
-    final score = _nullableInt(arguments['score']);
-    final maxScore = _nullableInt(arguments['max_score'] ?? arguments['maxScore']);
-    final xp = _int(arguments['xp']);
-    final understanding = _int(arguments['understanding']).clamp(0, 100).toInt();
-    final summary = _string(arguments['summary']);
-    final rawSkills = arguments['skills'];
-    final skills = rawSkills is List ? rawSkills : const <dynamic>[];
-
-    await db.transaction((transaction) async {
-      await transaction.insert(
-        'progress_events',
-        {
-          'conversation_id': conversationId,
-          'course_id': courseId,
-          'event_type': eventType.isEmpty ? 'progress_update' : eventType,
-          'payload_json': jsonEncode(arguments),
-          'created_at': now,
-        },
-      );
-
-      for (var index = 0; index < skills.length; index++) {
-        final raw = skills[index];
-        if (raw is! Map) continue;
-        final skill = Map<String, dynamic>.from(raw);
-        final skillId = _string(skill['id'] ?? skill['skill_id'] ?? skill['skillId']);
-        final skillLabel = _string(
-          skill['label'] ?? skill['name'] ?? skill['skill_label'],
-        );
-        if (skillId.isEmpty && skillLabel.isEmpty) continue;
-
-        final mastery = _int(skill['mastery']).clamp(0, 100).toInt();
-        final status = _normalizeProgressStatus(_string(skill['status']));
-        final correct = _bool(skill['correct']);
-        final skillXp = _int(skill['xp']);
-
-        final rows = await transaction.query(
-          'learning_progress',
-          where: 'subject = ? AND topic = ? AND skill_id = ?',
-          whereArgs: [subject, topic, skillId.isEmpty ? _slug(skillLabel) : skillId],
-          limit: 1,
-        );
-
-        final normalizedId = skillId.isEmpty ? _slug(skillLabel) : skillId;
-        if (rows.isEmpty) {
-          await transaction.insert(
-            'learning_progress',
-            {
-              'subject': subject,
-              'topic': topic,
-              'skill_id': normalizedId,
-              'skill_label': skillLabel.isEmpty ? normalizedId : skillLabel,
-              'mastery': mastery,
-              'status': status,
-              'attempts': eventType == 'answer_evaluated' ? 1 : 0,
-              'correct_answers': correct ? 1 : 0,
-              'xp': skillXp,
-              'updated_at': now,
+    final record = _conversationRecords[conversationId];
+    final messages = await loadMessages(
+      conversationId,
+      limit: recentMessageCount.clamp(1, 4).toInt(),
+    );
+    return CompactConversationContext(
+      summary: _clipRaw(record?.summary ?? '', 220),
+      recentTurns: messages
+          .map(
+            (message) => {
+              'role': message.isUser ? 'user' : 'assistant',
+              'text': _clipRaw(message.text, 140),
             },
-          );
-        } else {
-          final old = rows.first;
-          await transaction.update(
-            'learning_progress',
-            {
-              'skill_label': skillLabel.isEmpty
-                  ? (old['skill_label'] as String? ?? normalizedId)
-                  : skillLabel,
-              'mastery': mastery,
-              'status': status,
-              'attempts': (old['attempts'] as int? ?? 0) +
-                  (eventType == 'answer_evaluated' ? 1 : 0),
-              'correct_answers': (old['correct_answers'] as int? ?? 0) +
-                  (correct ? 1 : 0),
-              'xp': (old['xp'] as int? ?? 0) + skillXp,
-              'updated_at': now,
-            },
-            where: 'id = ?',
-            whereArgs: [old['id']],
-          );
-        }
-      }
-
-      final completed = eventType == 'lesson_completed' ||
-          _bool(arguments['lesson_completed'] ?? arguments['lessonCompleted']);
-
-      if (completed) {
-        await transaction.insert(
-          'lesson_attempts',
-          {
-            'conversation_id': conversationId,
-            'course_id': courseId.isEmpty ? 'course_$conversationId' : courseId,
-            'subject': subject,
-            'topic': topic,
-            'score': score,
-            'max_score': maxScore,
-            'xp': xp,
-            'status': 'completed',
-            'details_json': jsonEncode(arguments),
-            'started_at': now,
-            'completed_at': now,
-          },
-        );
-      }
-
-      await transaction.update(
-        'conversations',
-        {
-          if (subject.isNotEmpty) 'subject': subject,
-          if (topic.isNotEmpty) 'topic': topic,
-          if (courseId.isNotEmpty) 'course_id': courseId,
-          if (summary.isNotEmpty) 'summary': summary,
-          if (score != null) 'last_score': score,
-          if (maxScore != null) 'last_max_score': maxScore,
-          if (understanding > 0) 'understanding': understanding,
-          if (completed) 'status': 'completed',
-          if (completed) 'completed_at': now,
-          'updated_at': now,
-        },
-        where: 'id = ?',
-        whereArgs: [conversationId],
-      );
-    });
-
-    return getProgressContext(subject: subject, topic: topic);
+          )
+          .toList(growable: false),
+    );
   }
 
-  Future<LearningOverview> getLearningOverview({
+  Future<Map<String, dynamic>> buildCompactProgress({
     String? subject,
     String? topic,
+    int limit = 3,
   }) async {
-    final db = await _db;
-    final clauses = <String>[];
-    final args = <Object?>[];
-    if (subject != null && subject.trim().isNotEmpty) {
-      clauses.add('subject = ?');
-      args.add(subject.trim());
+    if (_guestMode) return const <String, dynamic>{};
+    final values = _skillProgress.values.where((skill) {
+      final subjectMatches = subject?.trim().isNotEmpty != true ||
+          skill.subject == subject!.trim();
+      final topicMatches = topic?.trim().isNotEmpty != true ||
+          skill.topic == topic!.trim();
+      return subjectMatches && topicMatches;
+    }).toList()
+      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+
+    return {
+      'skills': values
+          .take(limit.clamp(0, 4).toInt())
+          .map(
+            (skill) => {
+              'label': skill.skillLabel,
+              'mastery': skill.mastery,
+              'attempts': skill.attempts,
+            },
+          )
+          .toList(growable: false),
+    };
+  }
+
+  /// Profil pédagogique minimal envoyé au modèle.
+  /// Les coordonnées, l'e-mail, le téléphone et l'établissement ne sont
+  /// jamais ajoutés au prompt.
+  Future<Map<String, dynamic>> buildTutorProfile() async {
+    if (_guestMode) {
+      return const <String, dynamic>{'mode': 'guest'};
     }
-    if (topic != null && topic.trim().isNotEmpty) {
-      clauses.add('topic = ?');
-      args.add(topic.trim());
+    final profile = _localProfile;
+    if (profile == null) return const <String, dynamic>{};
+
+    final rawSubjects = profile['subjects'];
+    final subjects = rawSubjects is List
+        ? rawSubjects
+            .map((value) => _clipInline('$value', 24))
+            .where((value) => value.isNotEmpty)
+            .take(4)
+            .toList(growable: false)
+        : const <String>[];
+
+    return <String, dynamic>{
+      if (_clipInline('${profile['level'] ?? ''}', 18).isNotEmpty)
+        'level': _clipInline('${profile['level']}', 18),
+      if (_clipInline('${profile['account_type'] ?? ''}', 18).isNotEmpty)
+        'account_type': _clipInline('${profile['account_type']}', 18),
+      if (subjects.isNotEmpty) 'subjects': subjects,
+    };
+  }
+
+  Future<ProgressSaveResult> saveProgressIfValid({
+    required int conversationId,
+    required LessonState lesson,
+    required ProgressUpdate progress,
+  }) async {
+    if (_guestMode || !progress.isValid) return ProgressSaveResult.none;
+    if (lesson.courseId.trim().isEmpty ||
+        lesson.subject.trim().isEmpty ||
+        lesson.topic.trim().isEmpty) {
+      return ProgressSaveResult.none;
     }
 
-    final where = clauses.isEmpty ? null : clauses.join(' AND ');
-    final rows = await db.query(
-      'learning_progress',
-      where: where,
-      whereArgs: args,
-      orderBy: 'updated_at DESC',
-      limit: 12,
-    );
-    final skills = rows.map(StoredSkillProgress.fromMap).toList(growable: false);
+    final label = progress.skillLabel.trim();
+    final id = progress.skillId.trim().isEmpty
+        ? _slug(label)
+        : progress.skillId.trim();
+    if (label.isEmpty || id.isEmpty) return ProgressSaveResult.none;
 
-    final xpRows = await db.rawQuery(
-      'SELECT COALESCE(SUM(xp), 0) AS total_xp, COUNT(*) AS completed '
-      'FROM lesson_attempts WHERE status = ?',
-      ['completed'],
+    final key = '${lesson.subject}|${lesson.topic}|$id';
+    final old = _skillProgress[key];
+    final attempts = (old?.attempts ?? 0) + 1;
+    final oldMastery = old?.mastery ?? 0;
+    final positiveAnswer = progress.correct ??
+        (progress.maxScore > 0 && progress.score == progress.maxScore);
+    final correctAnswers =
+        (old?.correctAnswers ?? 0) + (positiveAnswer ? 1 : 0);
+    final proposed = positiveAnswer
+        ? progress.understanding > oldMastery
+            ? progress.understanding
+            : oldMastery + 10
+        : oldMastery;
+    final newMastery = proposed.clamp(0, 100).toInt();
+    final positiveEvolution = newMastery > oldMastery;
+    final gameActivity = <String>{
+      'quiz',
+      'game',
+      'memory',
+      'chrono',
+      'true_false',
+      'truefalse',
+      'vrai_faux',
+    }.contains(lesson.activity.toLowerCase());
+
+    // Un mini-jeu terminé rapporte exactement un point. Les exercices
+    // continuent d'améliorer la maîtrise, mais n'ajoutent pas de point.
+    final pointsAdded = progress.lessonCompleted && gameActivity ? 1 : 0;
+    final now = DateTime.now().millisecondsSinceEpoch;
+
+    _skillProgress[key] = StoredSkillProgress(
+      subject: lesson.subject,
+      topic: lesson.topic,
+      skillId: id,
+      skillLabel: _clipInline(label, 120),
+      mastery: newMastery,
+      attempts: attempts,
+      correctAnswers: correctAnswers,
+      xp: (old?.xp ?? 0) + pointsAdded,
+      updatedAt: now,
     );
-    final totalXp = (xpRows.first['total_xp'] as int?) ?? 0;
-    final completedLessons = (xpRows.first['completed'] as int?) ?? 0;
-    final averageMastery = skills.isEmpty
+
+    if (progress.lessonCompleted && progress.maxScore > 0) {
+      final alreadySaved = _completedLessons.any(
+        (item) => item['course_id'] == lesson.courseId,
+      );
+      if (!alreadySaved) {
+        _completedLessons.add({
+          'conversation_id': conversationId,
+          'course_id': lesson.courseId,
+          'subject': lesson.subject,
+          'topic': lesson.topic,
+          'score': progress.score,
+          'max_score': progress.maxScore,
+          'points': pointsAdded,
+          'completed_at': now,
+        });
+      }
+    }
+    return ProgressSaveResult(
+      saved: true,
+      positiveEvolution: positiveEvolution,
+      pointsAdded: pointsAdded,
+      mastery: newMastery,
+    );
+  }
+
+  Future<LearningOverview> getLearningOverview() async {
+    if (_guestMode) {
+      return const LearningOverview(
+        totalXp: 0,
+        completedLessons: 0,
+        averageMastery: 0,
+        skills: [],
+      );
+    }
+    final skills = _skillProgress.values.toList()
+      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    final totalXp = skills.fold<int>(0, (sum, item) => sum + item.xp);
+    final average = skills.isEmpty
         ? 0
         : (skills.fold<int>(0, (sum, item) => sum + item.mastery) /
                 skills.length)
             .round();
-
     return LearningOverview(
       totalXp: totalXp,
-      completedLessons: completedLessons,
-      averageMastery: averageMastery,
-      skills: skills,
+      completedLessons: _completedLessons.length,
+      averageMastery: average,
+      skills: List.unmodifiable(skills.take(20)),
     );
   }
 
-  Future<Map<String, dynamic>> getProgressContext({
-    String? subject,
-    String? topic,
-  }) async {
-    final overview = await getLearningOverview(subject: subject, topic: topic);
-    return overview.toJson();
-  }
-
-  Future<String> buildCompactProgressJson({
-    String? subject,
-    String? topic,
-  }) async {
-    final overview = await getLearningOverview(subject: subject, topic: topic);
-    final compactSkills = overview.skills.take(6).map((skill) => {
-          'id': skill.skillId,
-          'label': skill.skillLabel,
-          'mastery': skill.mastery,
-          'status': skill.status,
-        });
-    return jsonEncode({
-      'total_xp': overview.totalXp,
-      'completed_lessons': overview.completedLessons,
-      'average_mastery': overview.averageMastery,
-      'skills': compactSkills.toList(),
-    });
-  }
-
-  Future<bool> clearLegacyDiscussionsOnce() async {
-    const markerKey = 'structured_discussions_reset_v1';
-    final marker = await _loadSetting(markerKey);
-    if (marker == 'done') return false;
-
-    final db = await _db;
-    await db.transaction((transaction) async {
-      await transaction.delete('chat_messages');
-      await transaction.delete('conversations');
-      await transaction.delete(
-        'app_settings',
-        where: 'setting_key = ?',
-        whereArgs: ['active_conversation_id'],
-      );
-      await transaction.insert(
-        'app_settings',
-        {'setting_key': markerKey, 'setting_value': 'done'},
-        conflictAlgorithm: ConflictAlgorithm.replace,
-      );
-    });
-    return true;
-  }
-
-  Future<void> clearAllDiscussions() async {
-    final db = await _db;
-    await db.transaction((transaction) async {
-      await transaction.delete('chat_messages');
-      await transaction.delete('conversations');
-      await transaction.delete('progress_events');
-      await transaction.delete('lesson_attempts');
-      await transaction.delete(
-        'app_settings',
-        where: 'setting_key = ?',
-        whereArgs: ['active_conversation_id'],
-      );
-    });
-  }
-
-  Future<void> clearConversation(int conversationId) async {
-    final db = await _db;
-    await db.delete(
-      'chat_messages',
-      where: 'conversation_id = ?',
-      whereArgs: [conversationId],
-    );
-    await db.update(
-      'conversations',
-      {
-        'summary': '',
-        'status': 'active',
-        'updated_at': DateTime.now().millisecondsSinceEpoch,
-      },
-      where: 'id = ?',
-      whereArgs: [conversationId],
+  Future<void> saveLocalProfile(Map<String, dynamic> profile) async {
+    _localProfile = Map<String, dynamic>.from(
+      jsonDecode(jsonEncode(profile)) as Map,
     );
   }
 
-  Future<void> close() async {
-    await _database?.close();
-    _database = null;
+  Future<Map<String, dynamic>?> loadLocalProfile() async {
+    final profile = _localProfile;
+    return profile == null ? null : Map<String, dynamic>.from(profile);
+  }
+
+  Future<void> setSignedIn(bool value) async {
+    if (value) {
+      await enterAccountMode();
+    } else {
+      await enterGuestMode();
+    }
+  }
+
+  Future<bool> isSignedIn() async => _signedIn;
+
+  Future<void> runMaintenance() async {
+    // Aucun stockage persistant et aucune maintenance SQLite.
   }
 }
 
-String _titleFromMessage(String message) {
-  final normalized = message.replaceAll(RegExp(r'\s+'), ' ').trim();
-  if (normalized.isEmpty || normalized == 'Message vocal') {
-    return 'Nouvelle discussion';
+String _clipInline(String value, int maxLength) {
+  final clean = value.replaceAll(RegExp(r'\s+'), ' ').trim();
+  if (clean.length <= maxLength) return clean;
+  return '${clean.substring(0, maxLength - 1).trimRight()}…';
+}
+
+String _clipRaw(String value, int maxLength) {
+  final clean = value.trim();
+  if (clean.length <= maxLength) return clean;
+  return '${clean.substring(0, maxLength - 1).trimRight()}…';
+}
+
+String _titleFromMessage(String value) {
+  final clean = _clipInline(value, 54);
+  return clean.isEmpty ? 'Nouvelle discussion' : clean;
+}
+
+String _buildLocalSummary({
+  required String subject,
+  required String topic,
+  required String userText,
+  required String assistantText,
+}) {
+  final parts = <String>[
+    if (subject.trim().isNotEmpty) subject.trim(),
+    if (topic.trim().isNotEmpty) topic.trim(),
+    if (userText.trim().isNotEmpty) 'Demande: ${_clipInline(userText, 70)}',
+    if (assistantText.trim().isNotEmpty)
+      'Réponse: ${_clipInline(assistantText, 80)}',
+  ];
+  return _clipRaw(parts.join(' · '), 180);
+}
+
+String _mergeSummary(String previous, String addition) {
+  final oldText = previous.trim();
+  final newText = addition.replaceAll(RegExp(r'\s+'), ' ').trim();
+  if (newText.isEmpty) return _clipRaw(oldText, 220);
+  if (oldText.toLowerCase().contains(newText.toLowerCase())) {
+    return _clipRaw(oldText, 220);
   }
-  if (normalized.length <= 42) return normalized;
-  return '${normalized.substring(0, 42).trim()}…';
-}
-
-String _string(dynamic value) => value == null ? '' : '$value'.trim();
-
-int _int(dynamic value) {
-  if (value is int) return value;
-  if (value is double) return value.round();
-  return int.tryParse(_string(value)) ?? 0;
-}
-
-int? _nullableInt(dynamic value) {
-  if (value == null) return null;
-  if (value is int) return value;
-  if (value is double) return value.round();
-  return int.tryParse(_string(value));
-}
-
-bool _bool(dynamic value) {
-  if (value is bool) return value;
-  return const {'true', '1', 'yes', 'oui'}.contains(_string(value).toLowerCase());
+  final merged = oldText.isEmpty ? newText : '$oldText • $newText';
+  return _clipRaw(merged, 220);
 }
 
 String _slug(String value) {
-  final lower = value.toLowerCase();
-  final normalized = lower
-      .replaceAll(RegExp(r'[àáâä]'), 'a')
-      .replaceAll(RegExp(r'[èéêë]'), 'e')
-      .replaceAll(RegExp(r'[ìíîï]'), 'i')
-      .replaceAll(RegExp(r'[òóôö]'), 'o')
-      .replaceAll(RegExp(r'[ùúûü]'), 'u')
-      .replaceAll(RegExp(r'[^a-z0-9]+'), '_')
+  return value
+      .toLowerCase()
+      .replaceAll(RegExp(r'[^a-z0-9à-ÿ]+'), '_')
       .replaceAll(RegExp(r'^_+|_+$'), '');
-  return normalized.isEmpty ? 'skill' : normalized;
-}
-
-String _normalizeProgressStatus(String status) {
-  switch (status.toLowerCase()) {
-    case 'mastered':
-    case 'maitrise':
-    case 'maîtrisé':
-      return 'mastered';
-    case 'in_progress':
-    case 'en cours':
-    case 'progressing':
-      return 'in_progress';
-    case 'reinforce':
-    case 'à renforcer':
-    case 'a renforcer':
-      return 'reinforce';
-    default:
-      return 'discover';
-  }
 }
