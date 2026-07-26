@@ -1,6 +1,6 @@
 name: gemmafy_mobile
 description: "Tuteur éducatif multimodal hors ligne propulsé par Gemma."
-publish_to: 'none'
+publish_to: "none"
 version: 1.0.0+1
 
 environment:
@@ -14,21 +14,21 @@ dependencies:
   flutter_gemma: ^1.3.1
   flutter_gemma_litertlm: ^1.1.0
   image_picker: ^1.1.2
+  file_selector: ^1.1.0
   path_provider: ^2.1.5
   flutter_markdown_plus: ^1.0.3
   google_fonts: ^8.2.0
   record: ^7.1.1
   flutter_tts: ^4.2.5
   sqflite: ^2.4.3
+  video_player: ^2.13.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-
   flutter_lints: ^6.0.0
 
 flutter:
   uses-material-design: true
-
   assets:
     - assets/images/

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../core/app_assets.dart';
+import '../../models/audio_language_mode.dart';
 import '../../services/local_auth_service.dart';
 import '../../services/local_learning_database.dart';
 import '../../theme/app_theme.dart';
@@ -8,7 +9,12 @@ import '../app_entry_screen.dart';
 import 'register_screen.dart';
 
 class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key});
+  const LoginScreen({
+    super.key,
+    this.initialLanguageMode = AudioLanguageMode.french,
+  });
+
+  final AudioLanguageMode initialLanguageMode;
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -21,6 +27,13 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _obscure = true;
   bool _remember = false;
   bool _busy = false;
+  late AudioLanguageMode _languageMode;
+
+  @override
+  void initState() {
+    super.initState();
+    _languageMode = widget.initialLanguageMode.normalized;
+  }
 
   @override
   void dispose() {
@@ -49,6 +62,7 @@ class _LoginScreenState extends State<LoginScreen> {
     await LocalLearningDatabase.instance.enterAccountMode(
       userId: result.user!.id,
       profile: result.user!.profile,
+      preferredLanguageMode: _languageMode,
     );
     if (!mounted) return;
     Navigator.of(context).pushAndRemoveUntil(
@@ -66,7 +80,9 @@ class _LoginScreenState extends State<LoginScreen> {
   Future<void> _continueWithoutAccount() async {
     if (_busy) return;
     setState(() => _busy = true);
-    await LocalLearningDatabase.instance.enterGuestMode();
+    await LocalLearningDatabase.instance.enterGuestMode(
+      languageMode: _languageMode,
+    );
     if (!mounted) return;
     Navigator.of(context).pushAndRemoveUntil(
       MaterialPageRoute<void>(builder: (_) => const AppEntryScreen()),
@@ -112,23 +128,32 @@ class _LoginScreenState extends State<LoginScreen> {
                                 color: AppTheme.lavender,
                                 borderRadius: BorderRadius.circular(15),
                               ),
-                              child: const Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Icon(
-                                    Icons.language_rounded,
+                              child: DropdownButtonHideUnderline(
+                                child: DropdownButton<AudioLanguageMode>(
+                                  value: _languageMode,
+                                  isDense: true,
+                                  icon: const Icon(
+                                    Icons.keyboard_arrow_down_rounded,
                                     color: AppTheme.accent,
-                                    size: 19,
                                   ),
-                                  SizedBox(width: 6),
-                                  Text(
-                                    'Français',
-                                    style: TextStyle(
-                                      color: AppTheme.accent,
-                                      fontWeight: FontWeight.w800,
-                                    ),
-                                  ),
-                                ],
+                                  items: selectableAudioLanguageModes
+                                      .map(
+                                        (mode) => DropdownMenuItem(
+                                          value: mode,
+                                          child: Text(mode.label),
+                                        ),
+                                      )
+                                      .toList(growable: false),
+                                  onChanged: _busy
+                                      ? null
+                                      : (mode) {
+                                          if (mode != null) {
+                                            setState(() {
+                                              _languageMode = mode.normalized;
+                                            });
+                                          }
+                                        },
+                                ),
                               ),
                             ),
                           ],
@@ -355,7 +380,9 @@ class _LoginScreenState extends State<LoginScreen> {
                         TextButton(
                           onPressed: () => Navigator.of(context).pushReplacement(
                             MaterialPageRoute<void>(
-                              builder: (_) => const RegisterScreen(),
+                              builder: (_) => RegisterScreen(
+                                initialLanguageMode: _languageMode,
+                              ),
                             ),
                           ),
                           child: const Text.rich(

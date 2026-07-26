@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../core/app_assets.dart';
+import '../../models/audio_language_mode.dart';
 import '../../services/local_auth_service.dart';
 import '../../services/local_learning_database.dart';
 import '../../theme/app_theme.dart';
@@ -8,7 +9,12 @@ import '../app_entry_screen.dart';
 import 'login_screen.dart';
 
 class RegisterScreen extends StatefulWidget {
-  const RegisterScreen({super.key});
+  const RegisterScreen({
+    super.key,
+    this.initialLanguageMode = AudioLanguageMode.french,
+  });
+
+  final AudioLanguageMode initialLanguageMode;
 
   @override
   State<RegisterScreen> createState() => _RegisterScreenState();
@@ -33,6 +39,13 @@ class _RegisterScreenState extends State<RegisterScreen> {
   bool _busy = false;
   bool _obscurePassword = true;
   bool _obscureConfirmation = true;
+  late AudioLanguageMode _languageMode;
+
+  @override
+  void initState() {
+    super.initState();
+    _languageMode = widget.initialLanguageMode.normalized;
+  }
 
   @override
   void dispose() {
@@ -135,6 +148,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
     await LocalLearningDatabase.instance.enterAccountMode(
       userId: result.user!.id,
       profile: result.user!.profile,
+      preferredLanguageMode: _languageMode,
     );
     if (!mounted) return;
     Navigator.of(context).pushAndRemoveUntil(
@@ -168,16 +182,54 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     constraints: const BoxConstraints(maxWidth: 450),
                     child: Column(
                       children: [
-                        Align(
-                          alignment: Alignment.centerLeft,
-                          child: IconButton(
-                            onPressed: _back,
-                            icon: const Icon(
-                              Icons.arrow_back_rounded,
-                              color: AppTheme.accent,
-                              size: 28,
+                        Row(
+                          children: [
+                            IconButton(
+                              onPressed: _back,
+                              icon: const Icon(
+                                Icons.arrow_back_rounded,
+                                color: AppTheme.accent,
+                                size: 28,
+                              ),
                             ),
-                          ),
+                            const Spacer(),
+                            Container(
+                              height: 40,
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 12),
+                              decoration: BoxDecoration(
+                                color: AppTheme.lavender,
+                                borderRadius: BorderRadius.circular(15),
+                              ),
+                              child: DropdownButtonHideUnderline(
+                                child: DropdownButton<AudioLanguageMode>(
+                                  value: _languageMode,
+                                  isDense: true,
+                                  icon: const Icon(
+                                    Icons.keyboard_arrow_down_rounded,
+                                    color: AppTheme.accent,
+                                  ),
+                                  items: selectableAudioLanguageModes
+                                      .map(
+                                        (mode) => DropdownMenuItem(
+                                          value: mode,
+                                          child: Text(mode.label),
+                                        ),
+                                      )
+                                      .toList(growable: false),
+                                  onChanged: _busy
+                                      ? null
+                                      : (mode) {
+                                          if (mode != null) {
+                                            setState(() {
+                                              _languageMode = mode.normalized;
+                                            });
+                                          }
+                                        },
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
                         SafeAssetImage(
                           path: AppAssets.logo,
@@ -214,7 +266,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
                         TextButton(
                           onPressed: () => Navigator.of(context).pushReplacement(
                             MaterialPageRoute<void>(
-                              builder: (_) => const LoginScreen(),
+                              builder: (_) => LoginScreen(
+                                initialLanguageMode: _languageMode,
+                              ),
                             ),
                           ),
                           child: const Text.rich(
