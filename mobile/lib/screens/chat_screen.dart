@@ -756,14 +756,24 @@ class _ChatScreenState extends State<ChatScreen> {
       _messages.add(user);
       _messages.add(assistant);
     });
-    await _db.saveExchange(
-      conversationId: id,
-      userText: userText,
-      userModality: 'text',
-      languageMode: _languageMode,
-      assistantResponse: response,
-    );
-    await _refreshConversations();
+    try {
+      await _db.saveExchange(
+        conversationId: id,
+        userText: userText,
+        userModality: 'text',
+        languageMode: _languageMode,
+        assistantResponse: response,
+      );
+      await _refreshConversations();
+    } catch (error, stackTrace) {
+      debugPrint('Sauvegarde du tour local impossible : $error');
+      debugPrintStack(stackTrace: stackTrace);
+      if (mounted) {
+        _showSnack(
+          'Le message reste affiché, mais sa sauvegarde locale a échoué.',
+        );
+      }
+    }
     _scrollToBottom();
   }
 
@@ -805,6 +815,42 @@ class _ChatScreenState extends State<ChatScreen> {
       choicesEnabled: false,
     );
     final localSerial = ++_generationSerial;
+    var lastPartialText = '';
+    var lastPartialScrollAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+    void showPartialResponse(String partialText) {
+      if (!mounted || localSerial != _generationSerial) return;
+
+      // Un rattrapage ne doit jamais vider la bulle déjà visible.
+      if (partialText.trim().isEmpty) {
+        setState(() => _generationLabel = 'Finalisation de la réponse…');
+        return;
+      }
+      if (partialText == lastPartialText) return;
+      lastPartialText = partialText;
+
+      setState(() {
+        placeholder
+          ..text = partialText
+          ..tutorResponse = AiTutorResponse(response: partialText)
+          ..status = MessageStatus.streaming
+          ..choicesEnabled = false;
+        _generationLabel = 'Mpanabe AI répond…';
+      });
+
+      final now = DateTime.now();
+      if (now.difference(lastPartialScrollAt) >=
+          const Duration(milliseconds: 180)) {
+        lastPartialScrollAt = now;
+        _scrollToBottom(jump: true);
+      }
+    }
+
+    final generationTimeout = imageBytes != null
+        ? const Duration(seconds: 210)
+        : audioBytes != null
+            ? const Duration(seconds: 180)
+            : const Duration(seconds: 150);
 
     setState(() {
       _messages.add(user);
@@ -832,8 +878,9 @@ class _ChatScreenState extends State<ChatScreen> {
               imageBytes: imageBytes,
               audioBytes: audioBytes,
               languageMode: _languageMode,
+              onPartialResponse: showPartialResponse,
             )
-            .timeout(const Duration(seconds: 100));
+            .timeout(generationTimeout);
       } catch (error) {
         if (!_isTokenError(error)) rethrow;
         debugPrint('♻️ Saturation détectée, reconstruction de session puis essai unique');
@@ -847,8 +894,9 @@ class _ChatScreenState extends State<ChatScreen> {
               imageBytes: imageBytes,
               audioBytes: audioBytes,
               languageMode: _languageMode,
+              onPartialResponse: showPartialResponse,
             )
-            .timeout(const Duration(seconds: 100));
+            .timeout(generationTimeout);
       }
 
       if (!mounted || localSerial != _generationSerial) return;
@@ -860,19 +908,34 @@ class _ChatScreenState extends State<ChatScreen> {
 
       var progressResult = ProgressSaveResult.none;
       if (canEvaluate) {
-        progressResult = await _db.saveProgressIfValid(
-          conversationId: conversationId,
-          lesson: response.lesson.courseId.isEmpty
-              ? lessonAtStart
-              : response.lesson,
-          progress: response.progress,
-        );
+        try {
+          progressResult = await _db.saveProgressIfValid(
+            conversationId: conversationId,
+            lesson: response.lesson.courseId.isEmpty
+                ? lessonAtStart
+                : response.lesson,
+            progress: response.progress,
+          );
+        } catch (error, stackTrace) {
+          // Une panne SQLite ne doit jamais remplacer la réponse pédagogique
+          // déjà générée par un message d'erreur ou faire disparaître le jeu.
+          debugPrint('Sauvegarde de progression impossible : $error');
+          debugPrintStack(stackTrace: stackTrace);
+          if (mounted) {
+            _showSnack(
+              'La manche continue, mais la progression locale n’a pas été sauvegardée.',
+            );
+          }
+        }
       }
 
       if (progressResult.pointsAdded > 0) {
+        final progressLabel = response.lessonCompleted
+            ? 'jeu terminé et progression sauvegardée'
+            : 'manche validée et progression sauvegardée';
         response = response.copyWith(
           response:
-              '${response.response}\n\n🏅 **+${progressResult.pointsAdded} point** — jeu terminé.',
+              '${response.response}\n\n🏅 **+${progressResult.pointsAdded} XP** — $progressLabel.',
           progress: response.progress.copyWith(
             xp: progressResult.pointsAdded,
             understanding: progressResult.mastery,
@@ -896,19 +959,29 @@ class _ChatScreenState extends State<ChatScreen> {
         _isGenerating = false;
       });
 
-      await _db.saveExchange(
-        conversationId: conversationId,
-        userText: visibleUserText,
-        userModality: audioBytes != null
-            ? 'audio'
-            : imageBytes != null
-                ? 'image'
-                : 'text',
-        audioDurationMs: audioDuration?.inMilliseconds,
-        languageMode: _languageMode,
-        assistantResponse: response,
-      );
-      await _refreshConversations();
+      try {
+        await _db.saveExchange(
+          conversationId: conversationId,
+          userText: visibleUserText,
+          userModality: audioBytes != null
+              ? 'audio'
+              : imageBytes != null
+                  ? 'image'
+                  : 'text',
+          audioDurationMs: audioDuration?.inMilliseconds,
+          languageMode: _languageMode,
+          assistantResponse: response,
+        );
+        await _refreshConversations();
+      } catch (error, stackTrace) {
+        debugPrint('Sauvegarde de discussion impossible : $error');
+        debugPrintStack(stackTrace: stackTrace);
+        if (mounted) {
+          _showSnack(
+            'La réponse reste affichée, mais sa sauvegarde locale a échoué.',
+          );
+        }
+      }
       _scrollToBottom();
     } on GenerationCancelledException {
       if (!mounted || localSerial != _generationSerial) return;
@@ -976,8 +1049,92 @@ class _ChatScreenState extends State<ChatScreen> {
   }) {
     if (!previous.isActive) return response;
     if (response.wasTruncated) {
+      // Pour une leçon ou un exercice, on conserve l'étape afin de ne pas
+      // valider une réponse non évaluée.
+      if (previous.step != 3 || !canEvaluate) {
+        return response.copyWith(
+          lesson: previous,
+          flow: previous.step == 3 ? 'game_round' : response.flow,
+        );
+      }
+
+      // Pour un jeu, un second échec de génération ne doit plus bloquer ou
+      // faire disparaître la partie. La manche est enregistrée localement
+      // comme tentative non notée, puis Flutter poursuit ou termine le jeu.
+      final total = previous.gameTotal.clamp(1, 2).toInt();
+      final isFinalRound = previous.gameQuestion >= total;
+      final recoveredLesson = previous.copyWith(
+        gameQuestion: isFinalRound ? total : previous.gameQuestion + 1,
+        awaitingAnswer: false,
+        completed: isFinalRound,
+      );
+      final recoveredProgress = ProgressUpdate(
+        save: true,
+        skillId:
+            '${_slug(previous.topic)}_${_slug(previous.activity)}',
+        skillLabel: '${_gameLabel(previous.activity)} — ${previous.topic}',
+        evidence: isFinalRound
+            ? 'Manche finale enregistrée localement après une réponse interrompue.'
+            : 'Manche ${previous.gameQuestion} enregistrée localement après une réponse interrompue.',
+        correct: null,
+        score: isFinalRound ? previous.gameCorrect : 0,
+        maxScore: isFinalRound ? total : 0,
+        understanding: 0,
+        xp: 0,
+        lessonCompleted: isFinalRound,
+      );
+
+      if (isFinalRound) {
+        return response.copyWith(
+          response: _decorateGameComplete(
+            text:
+                'La correction détaillée a été écourtée, mais ta dernière manche a bien été enregistrée.',
+            activity: previous.activity,
+            score: previous.gameCorrect,
+            total: total,
+          ),
+          choices: [
+            const TutorChoice(
+              id: 'complete_replay',
+              label: '🎮 Rejouer',
+              message: 'Je veux refaire un mini-jeu de 2 questions.',
+            ),
+            if (!_isGuestMode)
+              const TutorChoice(
+                id: 'complete_progress',
+                label: '📈 Voir ma progression',
+                message: 'Affiche ma progression.',
+              ),
+            const TutorChoice(
+              id: 'complete_new_lesson',
+              label: '📚 Nouvelle leçon',
+              message: 'Je veux commencer une nouvelle leçon.',
+            ),
+          ],
+          lesson: recoveredLesson,
+          progress: recoveredProgress,
+          flow: 'lesson_complete',
+          action: 'finish',
+          wasTruncated: false,
+        );
+      }
+
       return response.copyWith(
-        lesson: previous.copyWith(awaitingAnswer: false),
+        response:
+            'La correction détaillée a été écourtée, mais la manche ${previous.gameQuestion} est enregistrée. Continuons avec la manche ${previous.gameQuestion + 1}.',
+        choices: [
+          TutorChoice(
+            id: 'game_continue_recovery',
+            label: '▶ Manche ${previous.gameQuestion + 1}',
+            message:
+                'Génère uniquement la manche ${previous.gameQuestion + 1} sur $total avec une question très courte et 2 ou 3 choix.',
+          ),
+        ],
+        lesson: recoveredLesson,
+        progress: recoveredProgress,
+        flow: 'game_recovery',
+        action: 'wait_answer',
+        wasTruncated: false,
       );
     }
 
@@ -1103,29 +1260,61 @@ class _ChatScreenState extends State<ChatScreen> {
     );
 
     var evaluatedProgress = response.progress;
-    if (canEvaluate && inferredCorrect != null) {
-      final evidence = response.response.length > 180
-          ? '${response.response.substring(0, 179).trimRight()}…'
-          : response.response;
+    final isGameAnswer = canEvaluate && previous.step == 3;
+    final hasEvaluatedAnswer = canEvaluate && inferredCorrect != null;
+
+    // Pour les jeux, Flutter enregistre chaque manche même lorsque Gemma
+    // oublie le champ progress.correct. Cela évite que certains modes
+    // (mémoire, chrono ou vrai/faux) terminent sans aucune progression.
+    if (isGameAnswer || hasEvaluatedAnswer) {
+      final rawEvidence = normalizeTutorMarkdown(response.response);
+      final clippedEvidence = rawEvidence.length > 180
+          ? '${rawEvidence.substring(0, 179).trimRight()}…'
+          : rawEvidence;
+      final fallbackEvidence = isGameAnswer
+          ? completed
+              ? '${_gameLabel(previous.activity)} terminé : score $gameCorrect/$gameTotal.'
+              : 'Manche ${previous.gameQuestion.clamp(1, gameTotal)} sur $gameTotal validée.'
+          : 'Réponse évaluée pendant ${_stageForStep(previous.step).toLowerCase()}.';
+      final modelProgress = evaluatedProgress;
+      final knownRoundScore = inferredCorrect == null
+          ? 0
+          : inferredCorrect
+              ? 1
+              : 0;
+
       evaluatedProgress = ProgressUpdate(
         save: true,
-        skillId: evaluatedProgress.skillId.trim().isEmpty
-            ? '${_slug(previous.topic)}_step_${previous.step}'
-            : evaluatedProgress.skillId,
-        skillLabel: evaluatedProgress.skillLabel.trim().isEmpty
-            ? '${_stageForStep(previous.step)} — ${previous.topic}'
-            : evaluatedProgress.skillLabel,
-        evidence: evaluatedProgress.evidence.trim().isEmpty
-            ? evidence
-            : evaluatedProgress.evidence,
+        // Pour un jeu, l'identifiant est toujours calculé localement afin
+        // que les deux manches alimentent exactement la même compétence.
+        skillId: isGameAnswer
+            ? '${_slug(previous.topic)}_${_slug(previous.activity)}'
+            : modelProgress.skillId.trim().isEmpty
+                ? '${_slug(previous.topic)}_step_${previous.step}'
+                : modelProgress.skillId,
+        skillLabel: isGameAnswer
+            ? '${_gameLabel(previous.activity)} — ${previous.topic}'
+            : modelProgress.skillLabel.trim().isEmpty
+                ? '${_stageForStep(previous.step)} — ${previous.topic}'
+                : modelProgress.skillLabel,
+        evidence: modelProgress.evidence.trim().isEmpty
+            ? clippedEvidence.trim().isEmpty
+                ? fallbackEvidence
+                : clippedEvidence
+            : modelProgress.evidence,
         correct: inferredCorrect,
-        score: completed ? gameCorrect : (inferredCorrect ? 1 : 0),
-        maxScore: completed ? gameTotal : 1,
-        understanding: inferredCorrect
-            ? evaluatedProgress.understanding.clamp(0, 100).toInt()
+        // À la dernière manche, le score local est la source de vérité.
+        // Pour une manche dont Gemma n'a pas indiqué la correction, on garde
+        // maxScore=0 mais l'évidence permet quand même d'enregistrer l'essai.
+        score: completed ? gameCorrect : knownRoundScore,
+        maxScore: completed
+            ? gameTotal
+            : inferredCorrect == null
+                ? 0
+                : 1,
+        understanding: inferredCorrect == true
+            ? modelProgress.understanding.clamp(0, 100).toInt()
             : 0,
-        // Les points sont calculés par le stockage local uniquement si la
-        // maîtrise augmente réellement.
         xp: 0,
         lessonCompleted: completed,
       );
@@ -1235,9 +1424,29 @@ class _ChatScreenState extends State<ChatScreen> {
                   const SizedBox(width: 10),
                   Expanded(
                     child: _ProgressMetric(
-                      icon: Icons.school_rounded,
-                      label: 'Cours finis',
+                      icon: Icons.sports_esports_rounded,
+                      label: 'Jeux finis',
                       value: '${overview.completedLessons}',
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Expanded(
+                    child: _ProgressMetric(
+                      icon: Icons.sports_score_rounded,
+                      label: 'Score global',
+                      value: overview.scoreLabel,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _ProgressMetric(
+                      icon: Icons.trending_up_rounded,
+                      label: 'Maîtrise moyenne',
+                      value: '${overview.averageMastery} %',
                     ),
                   ),
                 ],
@@ -1260,7 +1469,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 const Padding(
                   padding: EdgeInsets.symmetric(vertical: 30),
                   child: Text(
-                    'Termine un exercice ou un quiz pour commencer à enregistrer ta progression.',
+                    'Valide une manche de jeu pour commencer à enregistrer ton score et ta progression.',
                     textAlign: TextAlign.center,
                     style: TextStyle(color: AppTheme.textSecondary),
                   ),

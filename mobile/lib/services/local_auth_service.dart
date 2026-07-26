@@ -38,8 +38,8 @@ class LocalAuthResult {
 
 /// Authentification locale et hors ligne.
 ///
-/// Cette base ne contient que les comptes et la session. Les discussions
-/// restent gérées séparément et ne sont pas enregistrées ici.
+/// Cette base ne contient que les comptes et la session. Les discussions et
+/// la progression sont enregistrées dans gemmafy_learning.db.
 class LocalAuthService {
   LocalAuthService._();
 

@@ -9,12 +9,17 @@ import 'theme/app_theme.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Initialise uniquement la petite base des comptes. Les discussions
-  // restent en mémoire et le moteur IA n'est pas chargé avant le chatbot.
-  await Future.wait([
-    LocalLearningDatabase.instance.initialize(),
-    LocalAuthService.instance.initialize(),
-  ]);
+  // Les comptes sont initialisés avant la base pédagogique afin de restaurer
+  // le bon espace SQLite (discussions + progression) pour l'utilisateur.
+  await LocalAuthService.instance.initialize();
+  await LocalLearningDatabase.instance.initialize();
+  final rememberedUser = LocalAuthService.instance.currentUserSync;
+  if (rememberedUser != null) {
+    await LocalLearningDatabase.instance.restoreAccountSession(
+      userId: rememberedUser.id,
+      profile: rememberedUser.profile,
+    );
+  }
 
   runApp(const GemmafyApp());
 }

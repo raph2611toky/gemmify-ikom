@@ -132,10 +132,10 @@ class _RegisterScreenState extends State<RegisterScreen> {
       return;
     }
 
-    await LocalLearningDatabase.instance.saveLocalProfile(
-      result.user!.profile,
+    await LocalLearningDatabase.instance.enterAccountMode(
+      userId: result.user!.id,
+      profile: result.user!.profile,
     );
-    await LocalLearningDatabase.instance.enterAccountMode();
     if (!mounted) return;
     Navigator.of(context).pushAndRemoveUntil(
       MaterialPageRoute<void>(builder: (_) => const AppEntryScreen()),
