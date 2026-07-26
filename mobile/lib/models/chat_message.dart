@@ -30,7 +30,7 @@ class ChatMessage {
     this.audioPlaceholder = false,
     this.audioDuration,
     DateTime? createdAt,
-    this.voiceLanguageMode = AudioLanguageMode.mixed,
+    this.voiceLanguageMode = AudioLanguageMode.french,
     this.status = MessageStatus.done,
     this.choicesEnabled = true,
     this.selectedChoiceId,

@@ -311,21 +311,24 @@ Tu es Mpanabe AI, professeur clair et patient pour un élève à Madagascar.
 Retourne uniquement UN objet JSON compact, fermé par }, puis arrête.
 
 Sans choix :
-{"response":"texte","subject":"matière","topic":"sujet","action":"none"}
+{"response":"<valiny>","subject":"<taranja>","topic":"<lohahevitra>","action":"none"}
 Avec choix :
-{"response":"question","choices":["choix 1","choix 2"],"subject":"matière","topic":"sujet","action":"wait_answer"}
+{"response":"<fanontaniana>","choices":["<safidy 1>","<safidy 2>"],"subject":"<taranja>","topic":"<lohahevitra>","action":"wait_answer"}
 Après une réponse évaluée, ajoute éventuellement :
-{"evaluation":{"skill":"compétence","correct":true}}
+{"evaluation":{"skill":"<compétence>","correct":true}}
 
 Règles obligatoires :
-- Respecte `language_rule`. Utilise seulement le français ou le malagasy en alphabet latin. Jamais d'autre langue ni d'autre écriture.
+- `language_code` vaut `fr` ou `mg` et commande toute la sortie visible.
+- Si `language_code` vaut `mg`, tous les textes visibles sont uniquement en malagasy, sans mots français : `response`, chaque élément de `choices`, question, correction, jeu, score et encouragement. Utilise « Marina » et « Diso ».
+- Si `language_code` vaut `fr`, écris tout en français uniquement.
+- La langue des anciens messages ne doit jamais remplacer `language_code`.
+- Utilise seulement l'alphabet latin. Jamais d'autre langue ni d'autre écriture.
 - `response` doit être complète, simple et courte : respecte `response_limit_words`.
 - Explication : une seule idée et un seul exemple.
 - Exercice initial : une seule question, sans donner la solution.
 - Ne recopie jamais les choix dans `response`; mets-les seulement dans `choices`.
 - Les choix doivent être courts, distincts et au nombre de 2 ou 3.
 - Jeu/quiz : 2 manches, une seule question affichée à la fois.
-- Vrai/faux : exactement ["Vrai","Faux"].
 - Après la manche 1 : correction en une phrase puis manche 2.
 - Après la manche 2 : score final et encouragement, sans nouvelle question.
 - N'écris jamais Étape 1, Étape 2 ou Étape 3.
@@ -335,27 +338,19 @@ Règles obligatoires :
 ''';
 
   static String _audioInstruction(AudioLanguageMode mode) {
-    switch (mode) {
-      case AudioLanguageMode.malagasy:
-        return 'Valio amin’ny teny malagasy. Aza aseho ny transcription.';
-      case AudioLanguageMode.mixed:
-        return 'Réponds en malagasy ou en français selon le message, sans transcription.';
-      case AudioLanguageMode.french:
-        return 'Réponds en français clair sans afficher la transcription.';
+    if (mode.normalized.isMalagasy) {
+      return "Henoy ilay feo ary valio amin'ny teny malagasy ihany. Aza aseho ny transcription.";
     }
+    return "Écoute le message et réponds uniquement en français. N'affiche pas la transcription.";
   }
 
   static String _responseLanguageInstruction(AudioLanguageMode mode) {
-    switch (mode) {
-      case AudioLanguageMode.malagasy:
-        return 'Réponds uniquement en malagasy avec l’alphabet latin.';
-      case AudioLanguageMode.mixed:
-        return 'Réponds dans la langue du message, uniquement en français ou '
-            'en malagasy avec l’alphabet latin. N’utilise aucune autre langue.';
-      case AudioLanguageMode.french:
-        return 'Réponds uniquement en français avec l’alphabet latin.';
+    if (mode.normalized.isMalagasy) {
+      return 'MALAGASY HENTITRA: ny lahatsoratra rehetra ao amin’ny response sy choices dia amin’ny teny malagasy ihany. Aza mampiditra teny na fehezanteny frantsay, na dia teny teknika aza; hazavao amin’ny teny malagasy. Ny fanalahidin’ny JSON ihany no mijanona araka ny endriny. Tehirizo ny isa, ny mari-pamantarana, ny raikipohy ary ny anarana manokana. Ho an’ny marina sa diso dia soraty Marina sy Diso.';
     }
+    return 'FRANÇAIS STRICT : la réponse, les choix, les explications, questions, corrections, jeux, scores et encouragements doivent tous être uniquement en français.';
   }
+
 
   void _ensureActive(int serial) {
     if (_activeRequestSerial != serial) {
@@ -398,7 +393,7 @@ Règles obligatoires :
     bool answerCanBeEvaluated = false,
     Uint8List? imageBytes,
     Uint8List? audioBytes,
-    AudioLanguageMode languageMode = AudioLanguageMode.mixed,
+    AudioLanguageMode languageMode = AudioLanguageMode.french,
     void Function(String text)? onPartialResponse,
   }) async {
     if (_isGenerating) {
@@ -471,6 +466,7 @@ Règles obligatoires :
 
     final envelope = jsonEncode({
       'message': normalizedText,
+      'language_code': languageMode.normalized.isMalagasy ? 'mg' : 'fr',
       if (student.isNotEmpty) 'student': student,
       'language_rule': _responseLanguageInstruction(languageMode),
       if (audioBytes != null) 'audio_rule': _audioInstruction(languageMode),
@@ -502,6 +498,7 @@ Règles obligatoires :
         activeLesson,
         answerCanBeEvaluated,
         hasImage: imageBytes != null,
+        languageMode: languageMode,
       ),
     });
 
@@ -514,12 +511,14 @@ Règles obligatoires :
         activeLesson: activeLesson,
         imageBytes: imageBytes,
         audioBytes: audioBytes,
+        languageMode: languageMode,
         onPartialResponse: onPartialResponse,
       );
 
       // Un JSON coupé ne doit plus enfermer l'utilisateur dans une boucle
       // « Reprendre ». On effectue un seul rattrapage automatique et compact.
-      if (response.wasTruncated) {
+      if (response.wasTruncated ||
+          _needsStrictLanguageRetry(response, languageMode)) {
         // Ne jamais effacer le texte déjà visible pendant le rattrapage.
         // Le second flux remplacera progressivement l'ancien seulement
         // lorsqu'un nouveau texte utile sera réellement disponible.
@@ -532,9 +531,8 @@ Règles obligatoires :
           ..remove('progress')
           ..['response_limit_words'] = 24
           ..['task'] =
-              '${_taskFor(activeLesson, answerCanBeEvaluated, hasImage: imageBytes != null)} '
-              'Rattrapage unique : réponse complète en 16 à 24 mots. '
-              'JSON minimal, valide et fermé immédiatement.'
+              '${_taskFor(activeLesson, answerCanBeEvaluated, hasImage: imageBytes != null, languageMode: languageMode)} '
+              '${languageMode.normalized.isMalagasy ? 'Fanandramana farany: valiny feno amin\'ny teny malagasy, 16 ka hatramin\'ny 24 teny. JSON fohy sy mihidy avy hatrany.' : 'Rattrapage unique : réponse complète en français, 16 à 24 mots. JSON minimal, valide et fermé immédiatement.'}'
           ..['compact_retry'] = true;
 
         response = await _runGeneration(
@@ -543,18 +541,37 @@ Règles obligatoires :
           activeLesson: activeLesson,
           imageBytes: imageBytes,
           audioBytes: audioBytes,
+          languageMode: languageMode,
           onPartialResponse: (text) {
             if (text.trim().isNotEmpty) onPartialResponse?.call(text);
           },
         );
       }
 
+      // Même après le rattrapage, aucun texte français ne doit apparaître
+      // lorsque l'élève a choisi Malagasy. On affiche alors un message local
+      // complet en malagasy plutôt qu'une sortie dans la mauvaise langue.
+      if (_needsStrictLanguageRetry(response, languageMode)) {
+        response = _malagasyLanguageSafetyResponse(
+          activeLesson,
+          answerCanBeEvaluated,
+        );
+        onPartialResponse?.call(response.response);
+      }
+
       final inferredSubject = activeLesson.subject.trim().isNotEmpty
           ? activeLesson.subject
-          : _inferSubject(normalizedText);
+          : _inferSubject(
+              normalizedText,
+              malagasy: languageMode.normalized.isMalagasy,
+            );
       final inferredTopic = activeLesson.topic.trim().isNotEmpty
           ? activeLesson.topic
-          : _inferTopic(normalizedText, inferredSubject);
+          : _inferTopic(
+              normalizedText,
+              inferredSubject,
+              malagasy: languageMode.normalized.isMalagasy,
+            );
       response = response.copyWith(
         lesson: response.lesson.copyWith(
           subject: response.lesson.subject.trim().isEmpty
@@ -578,6 +595,7 @@ Règles obligatoires :
     required LessonState activeLesson,
     Uint8List? imageBytes,
     Uint8List? audioBytes,
+    required AudioLanguageMode languageMode,
     void Function(String text)? onPartialResponse,
   }) async {
     final chat = _chat;
@@ -615,7 +633,9 @@ Règles obligatoires :
       final partial = _sanitizeStreamingPreview(
         _extractPartialResponse(buffer.toString()),
       );
-      if (partial.isNotEmpty && partial != lastPartial) {
+      if (partial.isNotEmpty &&
+          partial != lastPartial &&
+          _canStreamInSelectedLanguage(partial, languageMode)) {
         lastPartial = partial;
         onPartialResponse?.call(partial);
       }
@@ -623,9 +643,13 @@ Règles obligatoires :
     _ensureActive(serial);
     _turnsInSession++;
 
-    return AiTutorResponse.parse(buffer.toString()).normalized(
+    return AiTutorResponse.parse(
+      buffer.toString(),
+      languageMode: languageMode,
+    ).normalized(
       fallbackLesson: activeLesson,
       lessonMode: activeLesson.isActive,
+      languageMode: languageMode,
     );
   }
 
@@ -676,6 +700,114 @@ Règles obligatoires :
 }
 
 
+bool _canStreamInSelectedLanguage(
+  String text,
+  AudioLanguageMode languageMode,
+) {
+  if (!languageMode.normalized.isMalagasy) return true;
+  final sample = text.toLowerCase().replaceAll('’', "'");
+  final frenchCount = RegExp(
+    r'\b(le|la|les|un|une|des|du|de|est|sont|avec|pour|dans|choisis|réponse|reponse|question|vrai|faux|bonne|bien|calcule|explique|exercice|quiz)\b',
+  ).allMatches(sample).length;
+  final malagasyCount = RegExp(
+    r"\b(ny|dia|ary|amin'ny|ilay|ity|izany|valiny|fanontaniana|marina|diso|safidy|hazavao|omeo|tsara|lesona|lalao|fanazaran-tena)\b",
+  ).allMatches(sample).length;
+
+  // Pendant le flux, on évite de montrer une dérive française qui sera
+  // ensuite remplacée par le rattrapage strict.
+  return frenchCount == 0 || malagasyCount >= frenchCount;
+}
+
+bool _needsStrictLanguageRetry(
+  AiTutorResponse response,
+  AudioLanguageMode languageMode,
+) {
+  if (!languageMode.normalized.isMalagasy || response.wasTruncated) {
+    return false;
+  }
+  final sample = '${response.response} '
+          '${response.choices.map((choice) => choice.label).join(' ')}'
+      .toLowerCase()
+      .replaceAll('’', "'");
+
+  final frenchMarkers = RegExp(
+    r'\b(le|la|les|un|une|des|du|de|est|sont|avec|pour|dans|choisis|réponse|reponse|question|vrai|faux|bonne|bien|calcule|explique|exercice|quiz|score|manche)\b',
+  ).allMatches(sample).length;
+  final malagasyMarkers = RegExp(
+    r"\b(ny|dia|ary|amin'ny|ilay|ity|izany|valiny|fanontaniana|marina|diso|safidy|hazavao|omeo|tsara)\b",
+  ).allMatches(sample).length;
+
+  // On ne relance que si la dérive française est nette afin de ne pas
+  // ralentir les réponses contenant simplement un terme technique.
+  return frenchMarkers >= 2 && frenchMarkers > malagasyMarkers;
+}
+
+
+AiTutorResponse _malagasyLanguageSafetyResponse(
+  LessonState lesson,
+  bool answerExpected,
+) {
+  final fallbackLesson = lesson.isActive
+      ? lesson.copyWith(awaitingAnswer: true, completed: false)
+      : lesson;
+  final choices = lesson.isActive
+      ? _malagasyFallbackChoices(lesson)
+      : const <TutorChoice>[
+          TutorChoice(
+            id: 'retry_malagasy',
+            label: 'Avereno',
+            message: 'Avereno amin’ny teny malagasy fohy sy mazava ny valiny.',
+          ),
+        ];
+  final response = answerExpected
+      ? 'Tsy voavoatra tsara tamin’ny teny malagasy ny fanitsiana. Avereno ny valinao mba hahafahana manitsy azy mazava.'
+      : 'Tsy voavoatra tsara tamin’ny teny malagasy ny valiny. Tsindrio « Avereno » mba hamoronana valiny vaovao.';
+  return AiTutorResponse.local(
+    response: response,
+    choices: choices,
+    lesson: fallbackLesson,
+    flow: lesson.step == 3 ? 'game_recovery' : 'language_recovery',
+    action: 'wait_answer',
+  );
+}
+
+List<TutorChoice> _malagasyFallbackChoices(LessonState lesson) {
+  if (lesson.step == 2) {
+    return const [
+      TutorChoice(
+        id: 'exercise_retry',
+        label: 'Fanazaran-tena vaovao',
+        message: 'Omeo fanazaran-tena vaovao amin’ny teny malagasy ihany.',
+      ),
+    ];
+  }
+  if (lesson.step == 3) {
+    final activity = lesson.activity.toLowerCase();
+    if (activity == 'true_false' ||
+        activity == 'truefalse' ||
+        activity == 'vrai_faux') {
+      return const [
+        TutorChoice(id: 'game_true', label: '✅ Marina', message: 'Marina'),
+        TutorChoice(id: 'game_false', label: '❌ Diso', message: 'Diso'),
+      ];
+    }
+    return const [
+      TutorChoice(
+        id: 'game_retry_malagasy',
+        label: 'Fanontaniana vaovao',
+        message: 'Omeo fanontaniana vaovao amin’ny teny malagasy ihany.',
+      ),
+    ];
+  }
+  return const [
+    TutorChoice(
+      id: 'retry_malagasy',
+      label: 'Avereno',
+      message: 'Avereno amin’ny teny malagasy fohy sy mazava ny fanazavana.',
+    ),
+  ];
+}
+
 int _responseWordLimit(
   LessonState lesson,
   bool answerExpected, {
@@ -720,46 +852,99 @@ String _taskFor(
   LessonState lesson,
   bool answerExpected, {
   bool hasImage = false,
+  required AudioLanguageMode languageMode,
+}) {
+  if (languageMode.normalized.isMalagasy) {
+    return _taskForMalagasy(
+      lesson,
+      answerExpected,
+      hasImage: hasImage,
+    );
+  }
+  return _taskForFrench(
+    lesson,
+    answerExpected,
+    hasImage: hasImage,
+  );
+}
+
+String _taskForMalagasy(
+  LessonState lesson,
+  bool answerExpected, {
+  required bool hasImage,
 }) {
   if (hasImage && !lesson.isActive) {
-    return 'Observe attentivement l’image. Si elle montre un devoir ou un '
-        'exercice déjà rempli, corrige-le précisément : indique ce qui est '
-        'juste, ce qui est faux, donne la bonne réponse et une note seulement '
-        'si un barème est visible. Si l’image contient uniquement un énoncé '
-        'ou un cours, identifie la matière puis explique sans inventer.';
+    return 'Jereo tsara ilay sary. Raha enti-mody na fanazaran-tena efa novalian’ny mpianatra izy dia ahitsio: lazao izay marina sy diso, omeo ny valiny marina, ary asio naoty raha hita ny mari-pamantarana. Raha toromarika na lesona fotsiny no hita dia fantaro ny taranja sy ny lohahevitra, avy eo hazavao amin’ny teny malagasy. Aza mamorona zavatra tsy hita.';
   }
 
   if (hasImage && lesson.isActive) {
     return answerExpected
-        ? 'Considère l’image comme la réponse de l’élève à l’étape en cours. '
-            'Lis ce qui est visible, corrige précisément, explique l’erreur '
-            'éventuelle et évalue uniquement ce que l’image permet de vérifier.'
-        : 'Observe l’image dans le contexte de la leçon. Si elle contient une '
-            'réponse déjà rédigée, corrige-la; sinon explique l’énoncé visible '
-            'et poursuis l’étape actuelle sans inventer de contenu.';
+        ? 'Raiso ho valin’ny mpianatra amin’ity dingana ity ilay sary. Vakio izay hita, ahitsio mazava, hazavao amin’ny teny malagasy ny hadisoana, ary tombano izay tena azo hamarinina amin’ny sary ihany.'
+        : 'Jereo ilay sary mifandray amin’ny lesona. Raha misy valiny efa voasoratra dia ahitsio; raha toromarika ihany no hita dia hazavao amin’ny teny malagasy ary tohizo ny asa ankehitriny.';
   }
 
   if (!lesson.isActive) {
-    return 'Identifie la matière et le sujet. Explique clairement comme un '
-        'professeur attentif. Si la demande est un exercice, crée un exercice; '
-        'si c’est un jeu ou quiz, limite-le à 2 questions.';
+    return 'Fantaro ny taranja sy ny lohahevitra. Valio amin’ny teny malagasy tsotra ihany. Raha fanazavana no angatahina dia hazavao fohy; raha fanazaran-tena dia mamoròna fanazaran-tena iray; raha lalao dia fanontaniana roa ihany.';
   }
   if (lesson.step <= 1) {
     return answerExpected
-        ? 'Évalue cette réponse. Si elle est correcte, félicite brièvement et '
-            'demande de passer à l’exercice. Sinon réexplique plus simplement '
-            'avec une nouvelle petite question.'
-        : 'Explication : explique une seule idée avec un exemple très court. '
-            'Puis pose une seule question avec 2 ou 3 choix distincts. '
-            'Ne répète pas les choix dans le texte et ne numérote aucune étape.';
+        ? 'Tombano ilay valiny. Raha marina dia derao fohy ary asao hanomboka fanazaran-tena. Raha diso dia hazavao indray amin’ny fomba tsotra kokoa ary mametraha fanontaniana kely iray.'
+        : 'Hazavao hevitra iray amin’ny teny malagasy ary omeo ohatra fohy iray. Avy eo mametraha fanontaniana iray misy safidy roa na telo samy hafa. Aza averina ao amin’ny response ireo safidy.';
   }
   if (lesson.step == 2) {
     return answerExpected
-        ? 'Évalue l’exercice. Bonne réponse : félicite et annonce le jeu. '
-            'Erreur : montre l’erreur puis propose un exercice plus simple.'
-        : 'Exercice : donne uniquement un seul énoncé court à résoudre, '
-            'sans solution ni correction. Ajoute 2 ou 3 choix distincts dans '
-            'le champ choices seulement. Ne répète pas les choix dans response.';
+        ? 'Tombano ilay fanazaran-tena. Raha marina dia derao ary ambarao fa manaraka ny lalao. Raha diso dia asehoy fohy ny hadisoana ary omeo fanazaran-tena tsotra kokoa.'
+        : 'Omeo fanazaran-tena fohy iray hovahana, tsy misy valiny na fanitsiana mialoha. Ataovy ao amin’ny saha JSON choices ihany ny safidy roa na telo samy hafa.';
+  }
+
+  final current = lesson.gameQuestion <= 0 ? 1 : lesson.gameQuestion;
+  final differentRound = current > 1
+      ? 'Tsy maintsy hafa amin’ny fanontaniana teo aloha ity fanontaniana vaovao ity. '
+      : '';
+  final game = switch (lesson.activity.toLowerCase()) {
+    'true_false' || 'truefalse' || 'vrai_faux' =>
+      '${differentRound}Marina sa Diso: fehezanteny fohy iray ary ny safidy dia ["Marina","Diso"].',
+    'memory' =>
+      '${differentRound}Lalao fitadidiana: fampifandraisana fohy misy safidy roa na telo.',
+    'chrono' =>
+      '${differentRound}Fanamby ara-potoana: fanontaniana tena fohy misy safidy roa na telo.',
+    _ =>
+      '${differentRound}Lalao fanontaniana fohy: fanontaniana iray misy safidy roa na telo.',
+  };
+  return answerExpected
+      ? current >= lesson.gameTotal
+          ? 'Tombano ny fanontaniana farany amin’ny teny malagasy. Lazao raha marina na diso, omeo ny isa farany, ary farano amin’ny fampaherezana fohy. Aza mametraka fanontaniana vaovao.'
+          : 'Tombano fohy ny valiny teo aloha, avy eo omeo avy hatrany ny fanontaniana manaraka izay hafa tanteraka. Ny fanontaniana sy ny safidy rehetra dia amin’ny teny malagasy.'
+      : 'Lalao, fanontaniana $current amin’ny ${lesson.gameTotal}. $game Ampio marika kely sy lohatenin’ny fihodinana. Aza manoratra laharan-dingana.';
+}
+
+String _taskForFrench(
+  LessonState lesson,
+  bool answerExpected, {
+  required bool hasImage,
+}) {
+  if (hasImage && !lesson.isActive) {
+    return 'Observe attentivement l’image. Si elle montre un devoir ou un exercice déjà rempli, corrige-le précisément : indique ce qui est juste, ce qui est faux, donne la bonne réponse et une note seulement si un barème est visible. Si l’image contient uniquement un énoncé ou un cours, identifie la matière puis explique sans inventer.';
+  }
+
+  if (hasImage && lesson.isActive) {
+    return answerExpected
+        ? 'Considère l’image comme la réponse de l’élève à l’étape en cours. Lis ce qui est visible, corrige précisément, explique l’erreur éventuelle et évalue uniquement ce que l’image permet de vérifier.'
+        : 'Observe l’image dans le contexte de la leçon. Si elle contient une réponse déjà rédigée, corrige-la; sinon explique l’énoncé visible et poursuis l’étape actuelle sans inventer de contenu.';
+  }
+
+  if (!lesson.isActive) {
+    return 'Identifie la matière et le sujet. Explique clairement comme un professeur attentif. Si la demande est un exercice, crée un exercice; si c’est un jeu ou quiz, limite-le à 2 questions.';
+  }
+  if (lesson.step <= 1) {
+    return answerExpected
+        ? 'Évalue cette réponse. Si elle est correcte, félicite brièvement et demande de passer à l’exercice. Sinon réexplique plus simplement avec une nouvelle petite question.'
+        : 'Explication : explique une seule idée avec un exemple très court. Puis pose une seule question avec 2 ou 3 choix distincts. Ne répète pas les choix dans le texte et ne numérote aucune étape.';
+  }
+  if (lesson.step == 2) {
+    return answerExpected
+        ? 'Évalue l’exercice. Bonne réponse : félicite et annonce le jeu. Erreur : montre l’erreur puis propose un exercice plus simple.'
+        : 'Exercice : donne uniquement un seul énoncé court à résoudre, sans solution ni correction. Ajoute 2 ou 3 choix distincts dans le champ choices seulement. Ne répète pas les choix dans response.';
   }
   final current = lesson.gameQuestion <= 0 ? 1 : lesson.gameQuestion;
   final differentRound = current > 1
@@ -769,22 +954,14 @@ String _taskFor(
     'true_false' || 'truefalse' || 'vrai_faux' =>
       '${differentRound}Vrai ou faux : une affirmation courte et exactement les choix Vrai/Faux.',
     'memory' => '${differentRound}Jeu mémoire : une association courte avec 2 ou 3 choix.',
-    'chrono' =>
-      '${differentRound}Défi chrono : question très courte, ton énergique et 2 ou 3 choix.',
+    'chrono' => '${differentRound}Défi chrono : question très courte, ton énergique et 2 ou 3 choix.',
     _ => '${differentRound}Quiz rapide : question courte et 2 ou 3 choix.',
   };
   return answerExpected
       ? current >= lesson.gameTotal
-          ? 'Évalue la question finale. Donne un score sur ${lesson.gameTotal}, '
-              'un encouragement bref et termine. Aucun choix, aucune troisième '
-              'question, aucune demande de compréhension.'
-          : 'Évalue la question $current sur ${lesson.gameTotal} en une phrase, '
-              'puis affiche immédiatement une question ${current + 1} sur '
-              '${lesson.gameTotal}, différente de la précédente. $game '
-              'Ne demande jamais si l’élève a compris.'
-      : 'Jeu et quiz, question $current sur ${lesson.gameTotal}. $game Ajoute '
-          'un emoji et un titre de manche. Ne propose jamais « J’ai compris » '
-          'et n’écris aucun numéro d’étape.';
+          ? 'Évalue la question finale. Donne un score sur ${lesson.gameTotal}, un encouragement bref et termine. Aucun choix, aucune troisième question, aucune demande de compréhension.'
+          : 'Évalue la question $current sur ${lesson.gameTotal} en une phrase, puis affiche immédiatement une question ${current + 1} sur ${lesson.gameTotal}, différente de la précédente. $game Ne demande jamais si l’élève a compris.'
+      : 'Jeu et quiz, question $current sur ${lesson.gameTotal}. $game Ajoute un emoji et un titre de manche. Ne propose jamais « J’ai compris » et n’écris aucun numéro d’étape.';
 }
 
 /// Extrait progressivement le texte du champ JSON `response`.
@@ -874,36 +1051,64 @@ String _clip(String value, int maxLength) {
   return '${clean.substring(0, maxLength - 1).trimRight()}…';
 }
 
-String _inferSubject(String text) {
+String _inferSubject(String text, {bool malagasy = false}) {
   final value = text.toLowerCase();
-  if (RegExp(r'fraction|calcul|nombre|équation|equation|géométr|geometr|multipli|division')
+  if (RegExp(
+    r'fraction|ampahany|calcul|kajy|nombre|isa|équation|equation|géométr|geometr|multipli|fampitomboana|division|fizarana',
+  ).hasMatch(value)) {
+    return malagasy ? 'Kajy' : 'Mathématiques';
+  }
+  if (RegExp(
+    r'français|francais|teny frantsay|grammaire|fitsipi-pitenenana|conjug|matoanteny|orthographe|tsipelina|rédaction|redaction',
+  ).hasMatch(value)) {
+    return malagasy ? 'Teny frantsay' : 'Français';
+  }
+  if (RegExp(r'anglais|english|teny anglisy|vocabulaire anglais|verb in english')
       .hasMatch(value)) {
-    return 'Mathématiques';
+    return malagasy ? 'Teny anglisy' : 'Anglais';
   }
-  if (RegExp(r'français|francais|grammaire|conjug|orthographe|rédaction|redaction')
+  if (RegExp(r'science|siansa|physique|fizika|chimie|simia|biologie|svt')
       .hasMatch(value)) {
-    return 'Français';
+    return malagasy ? 'Siansa' : 'Sciences';
   }
-  if (RegExp(r'anglais|english|vocabulaire anglais|verb in english')
-      .hasMatch(value)) {
-    return 'Anglais';
-  }
-  if (RegExp(r'science|physique|chimie|biologie|svt').hasMatch(value)) {
-    return 'Sciences';
-  }
-  return 'Autre';
+  return malagasy ? 'Hafa' : 'Autre';
 }
 
-String _inferTopic(String text, String subject) {
+String _inferTopic(
+  String text,
+  String subject, {
+  bool malagasy = false,
+}) {
   final value = text.toLowerCase();
-  if (value.contains('fraction')) return 'Fractions';
-  if (value.contains('multipli')) return 'Multiplication';
-  if (value.contains('division')) return 'Division';
-  if (value.contains('conjug')) return 'Conjugaison';
-  if (value.contains('grammaire')) return 'Grammaire';
-  if (value.contains('orthographe')) return 'Orthographe';
-  if (value.contains('vocabulaire')) return 'Vocabulaire';
-  if (value.contains('physique')) return 'Physique';
-  if (value.contains('chimie')) return 'Chimie';
-  return subject == 'Autre' ? 'Question générale' : subject;
+  if (value.contains('fraction') || value.contains('ampahany')) {
+    return malagasy ? 'Ampahany' : 'Fractions';
+  }
+  if (value.contains('multipli') || value.contains('fampitomboana')) {
+    return malagasy ? 'Fampitomboana' : 'Multiplication';
+  }
+  if (value.contains('division') || value.contains('fizarana')) {
+    return malagasy ? 'Fizarana' : 'Division';
+  }
+  if (value.contains('conjug') || value.contains('matoanteny')) {
+    return malagasy ? 'Fampiasana matoanteny' : 'Conjugaison';
+  }
+  if (value.contains('grammaire') || value.contains('fitsipi-pitenenana')) {
+    return malagasy ? 'Fitsipi-pitenenana' : 'Grammaire';
+  }
+  if (value.contains('orthographe') || value.contains('tsipelina')) {
+    return malagasy ? 'Tsipelina' : 'Orthographe';
+  }
+  if (value.contains('vocabulaire') || value.contains('voambolana')) {
+    return malagasy ? 'Voambolana' : 'Vocabulaire';
+  }
+  if (value.contains('physique') || value.contains('fizika')) {
+    return malagasy ? 'Fizika' : 'Physique';
+  }
+  if (value.contains('chimie') || value.contains('simia')) {
+    return malagasy ? 'Simia' : 'Chimie';
+  }
+  return subject == (malagasy ? 'Hafa' : 'Autre')
+      ? (malagasy ? 'Fanontaniana ankapobeny' : 'Question générale')
+      : subject;
 }
+

@@ -112,7 +112,7 @@ class _ChatInputBarState extends State<ChatInputBar> {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
         content: Text(
-          'Le sélecteur de documents sera relié au module FilePicker.',
+          'Le sélecteur de documents utilise le module natif FileSelector.',
         ),
       ),
     );

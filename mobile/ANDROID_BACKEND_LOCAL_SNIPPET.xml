@@ -1,0 +1,11 @@
+<!-- android/app/src/main/AndroidManifest.xml -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:usesCleartextTraffic="true"
+        android:label="Mpanabe AI"
+        android:icon="@mipmap/ic_launcher">
+        <!-- Conserver ici les autres éléments existants de l'application. -->
+    </application>
+</manifest>

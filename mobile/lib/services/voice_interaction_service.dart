@@ -39,7 +39,7 @@ class VoiceInteractionService {
     });
 
     _initialized = true;
-    await _configureLanguage(AudioLanguageMode.mixed);
+    await _configureLanguage(AudioLanguageMode.french);
   }
 
   /// Configure la meilleure voix installée pour la langue choisie.
@@ -77,7 +77,7 @@ class VoiceInteractionService {
 
   Future<void> speak(
     String markdownText, {
-    AudioLanguageMode languageMode = AudioLanguageMode.mixed,
+    AudioLanguageMode languageMode = AudioLanguageMode.french,
   }) async {
     await initialize();
     await _tts.stop();

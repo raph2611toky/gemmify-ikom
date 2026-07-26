@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'audio_language_mode.dart';
+
 class TutorChoice {
   final String id;
   final String label;
@@ -375,7 +377,10 @@ class AiTutorResponse {
     );
   }
 
-  static AiTutorResponse parse(String rawText) {
+  static AiTutorResponse parse(
+    String rawText, {
+    AudioLanguageMode languageMode = AudioLanguageMode.french,
+  }) {
     final cleaned = rawText
         .trim()
         .replaceAll(RegExp(r'^```(?:json)?\s*', caseSensitive: false), '')
@@ -383,13 +388,18 @@ class AiTutorResponse {
         .trim();
 
     if (cleaned.isEmpty) {
-      return const AiTutorResponse(
-        response: 'La réponse n’est pas arrivée. Réessaie cette étape.',
+      final malagasy = languageMode.normalized.isMalagasy;
+      return AiTutorResponse(
+        response: malagasy
+            ? 'Tsy tonga ny valiny. Andramo indray ity asa ity.'
+            : 'La réponse n’est pas arrivée. Réessaie cette étape.',
         choices: [
           TutorChoice(
             id: 'retry_empty',
-            label: 'Réessayer',
-            message: 'Reprends exactement la même étape, très brièvement.',
+            label: malagasy ? 'Andramo indray' : 'Réessayer',
+            message: malagasy
+                ? 'Avereno fohy sy mazava ity asa ity.'
+                : 'Reprends exactement la même étape, très brièvement.',
           ),
         ],
         wasTruncated: true,
@@ -413,15 +423,18 @@ class AiTutorResponse {
       // Ne jamais afficher un texte réparé artificiellement : une chaîne JSON
       // refermée localement peut contenir une phrase réellement coupée.
       if (repairedOrIncomplete) {
-        return const AiTutorResponse(
-          response:
-              'La réponse a été interrompue. Reprenons cette étape proprement.',
+        final malagasy = languageMode.normalized.isMalagasy;
+        return AiTutorResponse(
+          response: malagasy
+              ? 'Tapaka ny valiny. Averintsika amin’ny fomba fohy sy mazava ity asa ity.'
+              : 'La réponse a été interrompue. Reprenons cette étape proprement.',
           choices: [
             TutorChoice(
               id: 'retry_truncated',
-              label: 'Reprendre',
-              message:
-                  'Reprends exactement cette étape avec une réponse courte et complète.',
+              label: malagasy ? 'Avereno' : 'Reprendre',
+              message: malagasy
+                  ? 'Avereno ity asa ity amin’ny valiny fohy sy feno.'
+                  : 'Reprends exactement cette étape avec une réponse courte et complète.',
             ),
           ],
           wasTruncated: true,
@@ -433,13 +446,18 @@ class AiTutorResponse {
       // Une sortie JSON coupée ne doit jamais afficher une phrase inachevée.
       // Le service effectuera un essai compact unique; si celui-ci échoue,
       // cette réponse locale, complète, sera affichée.
-      return const AiTutorResponse(
-        response: 'La réponse a été interrompue. Reprenons cette étape proprement.',
-        choices: const [
+      final malagasy = languageMode.normalized.isMalagasy;
+      return AiTutorResponse(
+        response: malagasy
+            ? 'Tapaka ny valiny. Averintsika amin’ny fomba fohy sy mazava ity asa ity.'
+            : 'La réponse a été interrompue. Reprenons cette étape proprement.',
+        choices: [
           TutorChoice(
             id: 'retry_truncated',
-            label: 'Reprendre',
-            message: 'Reprends exactement cette étape avec une réponse courte.',
+            label: malagasy ? 'Avereno' : 'Reprendre',
+            message: malagasy
+                ? 'Avereno fohy ity asa ity.'
+                : 'Reprends exactement cette étape avec une réponse courte.',
           ),
         ],
         wasTruncated: true,
@@ -452,12 +470,17 @@ class AiTutorResponse {
   AiTutorResponse normalized({
     required LessonState fallbackLesson,
     required bool lessonMode,
+    AudioLanguageMode languageMode = AudioLanguageMode.french,
   }) {
     var completeText = normalizeTutorMarkdown(response);
     if (completeText.isEmpty) {
-      completeText = lessonMode
-          ? 'Continuons cette étape de la leçon.'
-          : 'Je suis prêt à t’aider.';
+      completeText = languageMode.normalized.isMalagasy
+          ? lessonMode
+              ? 'Tohizantsika ity ampahan’ny lesona ity.'
+              : 'Vonona hanampy anao aho.'
+          : lessonMode
+              ? 'Continuons cette étape de la leçon.'
+              : 'Je suis prêt à t’aider.';
     }
 
     var normalizedLesson = lesson;
@@ -493,6 +516,10 @@ class AiTutorResponse {
         .where((choice) => choice.label.trim().isNotEmpty)
         .take(4)
         .toList(growable: false);
+    normalizedChoices = _localizeCommonChoices(
+      normalizedChoices,
+      languageMode,
+    );
 
     // Gemma peut parfois écrire les options dans le Markdown au lieu du
     // tableau JSON `choices`. On les récupère pour éviter une étape bloquée.
@@ -518,7 +545,10 @@ class AiTutorResponse {
     // Ne jamais utiliser « J’ai compris » comme réponse générique dans un
     // exercice ou un jeu. Chaque étape reçoit des actions adaptées.
     if (lessonMode && shouldWait && normalizedChoices.isEmpty) {
-      normalizedChoices = _fallbackChoicesForLesson(normalizedLesson);
+      normalizedChoices = _fallbackChoicesForLesson(
+        normalizedLesson,
+        languageMode,
+      );
     }
 
     return AiTutorResponse(
@@ -598,38 +628,52 @@ List<TutorChoice> _extractChoicesFromMarkdown(String text) {
   return result;
 }
 
-List<TutorChoice> _fallbackChoicesForLesson(LessonState lesson) {
+List<TutorChoice> _fallbackChoicesForLesson(
+  LessonState lesson,
+  AudioLanguageMode languageMode,
+) {
+  final malagasy = languageMode.normalized.isMalagasy;
   if (lesson.step <= 1) {
-    return const [
+    return [
       TutorChoice(
         id: 'continue_to_exercise',
-        label: 'Passer à l’exercice',
-        message: 'Commence maintenant l’étape 2 avec un exercice guidé.',
+        label: malagasy ? 'Hanomboka fanazaran-tena' : 'Passer à l’exercice',
+        message: malagasy
+            ? 'Atombohy izao ny fanazaran-tena misy tari-dalana.'
+            : 'Commence maintenant l’étape 2 avec un exercice guidé.',
       ),
       TutorChoice(
         id: 'example',
-        label: 'Un autre exemple',
-        message: 'Explique encore avec un autre exemple très simple.',
+        label: malagasy ? 'Ohatra hafa' : 'Un autre exemple',
+        message: malagasy
+            ? 'Hazavao indray amin’ny ohatra iray tena tsotra.'
+            : 'Explique encore avec un autre exemple très simple.',
       ),
       TutorChoice(
         id: 'dont_know',
-        label: 'Je ne sais pas',
-        message: 'Reprends doucement cette notion étape par étape.',
+        label: malagasy ? 'Tsy haiko' : 'Je ne sais pas',
+        message: malagasy
+            ? 'Hazavao moramora indray ity hevitra ity.'
+            : 'Reprends doucement cette notion étape par étape.',
       ),
     ];
   }
 
   if (lesson.step == 2) {
-    return const [
+    return [
       TutorChoice(
         id: 'exercise_hint',
-        label: '💡 Un indice',
-        message: 'Donne un indice court puis répète le même exercice avec ses choix.',
+        label: malagasy ? '💡 Soso-kevitra' : '💡 Un indice',
+        message: malagasy
+            ? 'Omeo soso-kevitra fohy ary avereno ilay fanazaran-tena sy ny safidy.'
+            : 'Donne un indice court puis répète le même exercice avec ses choix.',
       ),
       TutorChoice(
         id: 'exercise_retry',
-        label: 'Nouvel exercice',
-        message: 'Propose un autre exercice plus simple avec des choix.',
+        label: malagasy ? 'Fanazaran-tena hafa' : 'Nouvel exercice',
+        message: malagasy
+            ? 'Omeo fanazaran-tena hafa mora kokoa miaraka amin’ny safidy.'
+            : 'Propose un autre exercice plus simple avec des choix.',
       ),
     ];
   }
@@ -638,25 +682,73 @@ List<TutorChoice> _fallbackChoicesForLesson(LessonState lesson) {
   if (activity == 'true_false' ||
       activity == 'truefalse' ||
       activity == 'vrai_faux') {
-    return const [
-      TutorChoice(id: 'game_true', label: '✅ Vrai', message: 'Vrai'),
-      TutorChoice(id: 'game_false', label: '❌ Faux', message: 'Faux'),
+    return [
+      TutorChoice(
+        id: 'game_true',
+        label: malagasy ? '✅ Marina' : '✅ Vrai',
+        message: malagasy ? 'Marina' : 'Vrai',
+      ),
+      TutorChoice(
+        id: 'game_false',
+        label: malagasy ? '❌ Diso' : '❌ Faux',
+        message: malagasy ? 'Diso' : 'Faux',
+      ),
     ];
   }
 
-  return const [
+  return [
     TutorChoice(
       id: 'game_hint',
-      label: '💡 Indice',
-      message: 'Donne un indice court et répète la même question avec ses choix.',
+      label: malagasy ? '💡 Soso-kevitra' : '💡 Indice',
+      message: malagasy
+          ? 'Omeo soso-kevitra fohy ary avereno ilay fanontaniana sy ny safidy.'
+          : 'Donne un indice court et répète la même question avec ses choix.',
     ),
     TutorChoice(
       id: 'game_skip',
-      label: '⏭️ Passer',
-      message: 'Je passe cette question.',
+      label: malagasy ? '⏭️ Mandalo' : '⏭️ Passer',
+      message: malagasy
+          ? 'Handalo ity fanontaniana ity aho.'
+          : 'Je passe cette question.',
     ),
   ];
 }
+
+List<TutorChoice> _localizeCommonChoices(
+  List<TutorChoice> choices,
+  AudioLanguageMode languageMode,
+) {
+  if (!languageMode.normalized.isMalagasy) return choices;
+
+  String localize(String value) {
+    final clean = value.trim();
+    final key = clean
+        .toLowerCase()
+        .replaceAll('✅', '')
+        .replaceAll('❌', '')
+        .replaceAll('💡', '')
+        .replaceAll('⏭️', '')
+        .trim();
+    if (key == 'vrai' || key == 'true') return clean.contains('✅') ? '✅ Marina' : 'Marina';
+    if (key == 'faux' || key == 'false') return clean.contains('❌') ? '❌ Diso' : 'Diso';
+    if (key == 'réessayer' || key == 'reessayer') return 'Andramo indray';
+    if (key == 'reprendre') return 'Avereno';
+    if (key == 'indice' || key == 'un indice') return '💡 Soso-kevitra';
+    if (key == 'passer') return '⏭️ Mandalo';
+    return clean;
+  }
+
+  return choices
+      .map(
+        (choice) => TutorChoice(
+          id: choice.id,
+          label: localize(choice.label),
+          message: localize(choice.message),
+        ),
+      )
+      .toList(growable: false);
+}
+
 
 String normalizeTutorMarkdown(dynamic value) {
   var text = value == null ? '' : '$value';

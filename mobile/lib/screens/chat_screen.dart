@@ -15,6 +15,7 @@ import '../theme/app_theme.dart';
 import '../widgets/chat_input_bar.dart';
 import '../widgets/message_bubble.dart';
 import 'auth/welcome_screen.dart';
+import 'online_tools_screen.dart';
 
 enum _LessonSetupStage {
   idle,
@@ -56,11 +57,14 @@ class _ChatScreenState extends State<ChatScreen> {
   String _selectedTopic = '';
   String _selectedSubject = '';
   String? _presetActivity;
-  AudioLanguageMode _languageMode = AudioLanguageMode.mixed;
+  AudioLanguageMode _languageMode = AudioLanguageMode.french;
 
   bool get _hasConversationContent => _messages.isNotEmpty;
   bool get _answerCanBeEvaluated =>
       _activeLesson.isActive && _activeLesson.awaitingAnswer;
+  bool get _isMalagasy => _languageMode.normalized.isMalagasy;
+  String _tr(String french, String malagasy) =>
+      _isMalagasy ? malagasy : french;
 
   @override
   void initState() {
@@ -77,7 +81,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _bootstrap() async {
     try {
       await _db.runMaintenance();
-      _languageMode = await _db.loadLanguageMode();
+      _languageMode = (await _db.loadLanguageMode()).normalized;
       _isGuestMode = await _db.isGuestMode();
       final profile = await _db.loadLocalProfile();
       _studentName = profile?['first_name']?.toString().trim() ?? '';
@@ -164,7 +168,10 @@ class _ChatScreenState extends State<ChatScreen> {
     for (final item in stored) {
       AiTutorResponse? response;
       if (!item.isUser && item.structuredJson?.trim().isNotEmpty == true) {
-        response = AiTutorResponse.parse(item.structuredJson!);
+        response = AiTutorResponse.parse(
+          item.structuredJson!,
+          languageMode: item.languageMode,
+        );
       }
       restored.add(
         ChatMessage(
@@ -380,41 +387,71 @@ class _ChatScreenState extends State<ChatScreen> {
     _activeLesson = const LessonState();
 
     final response = AiTutorResponse.local(
-      response:
-          'Quelle leçon veux-tu travailler ? Choisis un thème ou écris le tien avec « Autre ».',
+      response: _tr(
+        'Quelle leçon veux-tu travailler ? Choisis un thème ou écris le tien avec « Autre ».',
+        'Inona ny lesona tianao hianarana? Misafidiana lohahevitra iray na soraty ao amin’ny « Hafa » ny anao.',
+      ),
       flow: 'lesson_topic',
-      choices: const [
-        TutorChoice(
-          id: 'topic_fractions',
-          label: 'Fractions',
-          message: 'Je veux apprendre les fractions.',
-        ),
-        TutorChoice(
-          id: 'topic_multiplication',
-          label: 'Multiplication',
-          message: 'Je veux apprendre la multiplication.',
-        ),
-        TutorChoice(
-          id: 'topic_conjugaison',
-          label: 'Conjugaison',
-          message: 'Je veux apprendre la conjugaison.',
-        ),
-        TutorChoice(
-          id: 'topic_sciences',
-          label: 'Sciences',
-          message: 'Je veux apprendre une leçon de sciences.',
-        ),
-        TutorChoice(
-          id: 'topic_other',
-          label: 'Autre',
-          message: 'Je veux choisir une autre leçon.',
-        ),
-      ],
+      choices: _isMalagasy
+          ? const [
+              TutorChoice(
+                id: 'topic_fractions',
+                label: 'Ampahany',
+                message: 'Te hianatra momba ny ampahany aho.',
+              ),
+              TutorChoice(
+                id: 'topic_multiplication',
+                label: 'Fampitomboana',
+                message: 'Te hianatra fampitomboana aho.',
+              ),
+              TutorChoice(
+                id: 'topic_conjugaison',
+                label: 'Fampiasana matoanteny',
+                message: 'Te hianatra fampiasana matoanteny aho.',
+              ),
+              TutorChoice(
+                id: 'topic_sciences',
+                label: 'Siansa',
+                message: 'Te hianatra lesona momba ny siansa aho.',
+              ),
+              TutorChoice(
+                id: 'topic_other',
+                label: 'Hafa',
+                message: 'Te hisafidy lesona hafa aho.',
+              ),
+            ]
+          : const [
+              TutorChoice(
+                id: 'topic_fractions',
+                label: 'Fractions',
+                message: 'Je veux apprendre les fractions.',
+              ),
+              TutorChoice(
+                id: 'topic_multiplication',
+                label: 'Multiplication',
+                message: 'Je veux apprendre la multiplication.',
+              ),
+              TutorChoice(
+                id: 'topic_conjugaison',
+                label: 'Conjugaison',
+                message: 'Je veux apprendre la conjugaison.',
+              ),
+              TutorChoice(
+                id: 'topic_sciences',
+                label: 'Sciences',
+                message: 'Je veux apprendre une leçon de sciences.',
+              ),
+              TutorChoice(
+                id: 'topic_other',
+                label: 'Autre',
+                message: 'Je veux choisir une autre leçon.',
+              ),
+            ],
     );
     await _appendLocalTurn(
       userText: presetActivity == null
-          ? 'Apprendre une leçon'
-          : _activityLabel(presetActivity),
+          ? _tr('Apprendre une leçon', 'Hianatra lesona')
+          : _activityLabel(presetActivity, malagasy: _isMalagasy),
       response: response,
     );
   }
@@ -423,7 +460,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final lesson = _activeLesson.copyWith(
       step: 3,
       totalSteps: 3,
-      stage: 'Jeu et quiz',
+      stage: _stageForStep(3, malagasy: _isMalagasy),
       awaitingAnswer: false,
       completed: false,
       gameQuestion: 0,
@@ -433,34 +470,60 @@ class _ChatScreenState extends State<ChatScreen> {
     return AiTutorResponse.local(
       response: [
         if (intro?.trim().isNotEmpty == true) intro!.trim(),
-        '## 🎮 Choisis ton jeu éducatif',
-        'Cette dernière étape permet de vérifier ce que tu as compris en jouant.',
+        _tr('## 🎮 Choisis ton jeu éducatif', '## 🎮 Fidio ny lalao fanabeazana'),
+        _tr(
+          'Cette dernière étape permet de vérifier ce que tu as compris en jouant.',
+          'Ity ampahany farany ity dia manamarina izay azonao amin’ny alalan’ny lalao.',
+        ),
       ].join('\n\n'),
       flow: 'game_menu',
       action: 'wait_answer',
       lesson: lesson,
-      choices: const [
-        TutorChoice(
-          id: 'game_quiz',
-          label: 'Quiz rapide',
-          message: 'Lance un mini quiz de 2 questions, une question à la fois.',
-        ),
-        TutorChoice(
-          id: 'game_memory',
-          label: 'Mémoire',
-          message: 'Lance un mini jeu de mémoire en 2 défis, un défi à la fois.',
-        ),
-        TutorChoice(
-          id: 'game_chrono',
-          label: 'Défi chrono',
-          message: 'Lance un défi chrono de 2 questions, une question à la fois.',
-        ),
-        TutorChoice(
-          id: 'game_true_false',
-          label: 'Vrai ou faux',
-          message: 'Lance un vrai ou faux de 2 affirmations, une à la fois.',
-        ),
-      ],
+      choices: _isMalagasy
+          ? const [
+              TutorChoice(
+                id: 'game_quiz',
+                label: 'Lalao fanontaniana fohy',
+                message: 'Atombohy ny lalao misy fanontaniana roa, iray isaky ny mandeha.',
+              ),
+              TutorChoice(
+                id: 'game_memory',
+                label: 'Fitadidiana',
+                message: 'Atombohy lalao fitadidiana misy fanamby 2, iray isaky ny mandeha.',
+              ),
+              TutorChoice(
+                id: 'game_chrono',
+                label: 'Fanamby ara-potoana',
+                message: 'Atombohy fanamby ara-potoana misy fanontaniana 2, iray isaky ny mandeha.',
+              ),
+              TutorChoice(
+                id: 'game_true_false',
+                label: 'Marina sa diso',
+                message: 'Atombohy marina sa diso misy fehezanteny 2, iray isaky ny mandeha.',
+              ),
+            ]
+          : const [
+              TutorChoice(
+                id: 'game_quiz',
+                label: 'Quiz rapide',
+                message: 'Lance un mini quiz de 2 questions, une question à la fois.',
+              ),
+              TutorChoice(
+                id: 'game_memory',
+                label: 'Mémoire',
+                message: 'Lance un mini jeu de mémoire en 2 défis, un défi à la fois.',
+              ),
+              TutorChoice(
+                id: 'game_chrono',
+                label: 'Défi chrono',
+                message: 'Lance un défi chrono de 2 questions, une question à la fois.',
+              ),
+              TutorChoice(
+                id: 'game_true_false',
+                label: 'Vrai ou faux',
+                message: 'Lance un vrai ou faux de 2 affirmations, une à la fois.',
+              ),
+            ],
     );
   }
 
@@ -481,7 +544,7 @@ class _ChatScreenState extends State<ChatScreen> {
       subject: _selectedSubject,
       topic: _selectedTopic,
       activity: normalizedActivity,
-      stage: _stageForStep(step),
+      stage: _stageForStep(step, malagasy: _isMalagasy),
       step: step,
       totalSteps: 3,
       awaitingAnswer: false,
@@ -504,12 +567,18 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     final instruction = switch (step) {
-      2 =>
-        'Commence directement un exercice sur « $_selectedTopic ». Propose un seul exercice guidé, clair, avec 3 ou 4 choix. Le titre affiché doit être simplement « Exercice ».',
-      3 =>
-        'Commence « Jeu et quiz » sur « $_selectedTopic » avec le mode $normalizedActivity. Le jeu contient exactement 2 questions. Donne la question 1 sur 2 avec 2 ou 3 choix, sans numéro d’étape.',
-      _ =>
-        'Commence une explication sur « $_selectedTopic ». Explique pédagogiquement en markdown avec un exemple concret, puis pose une seule petite question avec 3 ou 4 choix si cela convient. Le titre affiché doit être simplement « Explication ».',
+      2 => _tr(
+          'Commence directement un exercice sur « $_selectedTopic ». Propose un seul exercice guidé, clair, avec 2 ou 3 choix. Le titre affiché doit être simplement « Exercice ».',
+          'Manomboha fanazaran-tena iray momba ny « $_selectedTopic ». Omeo fanazaran-tena iray fohy sy mazava misy safidy roa na telo. Soraty amin’ny teny malagasy ihany.',
+        ),
+      3 => _tr(
+          'Commence « Jeu et quiz » sur « $_selectedTopic » avec le mode $normalizedActivity. Le jeu contient exactement 2 questions. Donne la question 1 sur 2 avec 2 ou 3 choix, sans numéro d’étape.',
+          'Manomboha lalao momba ny « $_selectedTopic » amin’ny fomba $normalizedActivity. Fanontaniana 2 ihany ny lalao. Omeo ny fanontaniana voalohany misy safidy 2 na 3 amin’ny teny malagasy.',
+        ),
+      _ => _tr(
+          'Commence une explication sur « $_selectedTopic ». Explique pédagogiquement avec un exemple concret, puis pose une seule petite question avec 2 ou 3 choix. Le titre doit être « Explication ».',
+          'Manomboha fanazavana momba ny « $_selectedTopic ». Hazavao amin’ny teny malagasy miaraka amin’ny ohatra iray, avy eo mametraha fanontaniana kely iray misy safidy 2 na 3.',
+        ),
     };
 
     await _generateTurn(
@@ -524,7 +593,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final lesson = _activeLesson.copyWith(
       step: 2,
       totalSteps: 3,
-      stage: 'Exercice',
+      stage: _stageForStep(2, malagasy: _isMalagasy),
       activity: 'exercise',
       awaitingAnswer: false,
       completed: false,
@@ -532,8 +601,10 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() => _activeLesson = lesson);
     await _generateTurn(
       visibleUserText: visibleUserText,
-      modelText:
-          'Passe directement à un exercice guidé sur « ${lesson.topic} » avec 2 ou 3 choix. Ne demande pas si l’élève a compris et n’écris aucun numéro d’étape.',
+      modelText: _tr(
+        'Passe directement à un exercice guidé sur « ${lesson.topic} » avec 2 ou 3 choix. Ne demande pas si l’élève a compris et n’écris aucun numéro d’étape.',
+        'Mandehana avy hatrany amin’ny fanazaran-tena momba ny « ${lesson.topic} » misy safidy roa na telo. Soraty amin’ny teny malagasy ihany.',
+      ),
       activeLessonOverride: lesson,
     );
   }
@@ -573,8 +644,10 @@ class _ChatScreenState extends State<ChatScreen> {
         _activeLesson.step == 2) {
       await _requestHintWithoutEvaluation(
         visibleUserText: choice.label,
-        instruction:
-            'Donne un indice très court pour le même exercice, puis répète exactement la question avec 2 ou 3 choix. N’évalue rien.',
+        instruction: _tr(
+          'Donne un indice très court pour le même exercice, puis répète exactement la question avec 2 ou 3 choix. N’évalue rien.',
+          'Omeo soso-kevitra fohy ho an’ilay fanazaran-tena, avy eo avereno ilay fanontaniana misy safidy roa na telo. Aza manome naoty.',
+        ),
       );
       return;
     }
@@ -584,8 +657,10 @@ class _ChatScreenState extends State<ChatScreen> {
         _activeLesson.step == 3) {
       await _requestHintWithoutEvaluation(
         visibleUserText: choice.label,
-        instruction:
-            'Donne un indice très court pour la même manche, puis répète la même question avec ses choix. N’évalue rien et ne change pas le numéro de question.',
+        instruction: _tr(
+          'Donne un indice très court pour la même manche, puis répète la même question avec ses choix. N’évalue rien et ne change pas le numéro de question.',
+          'Omeo soso-kevitra fohy ho an’ity fihodinana ity, avy eo avereno ilay fanontaniana sy ny safidy. Aza manome naoty ary aza ovaina ny laharan’ny fanontaniana.',
+        ),
       );
       return;
     }
@@ -596,14 +671,16 @@ class _ChatScreenState extends State<ChatScreen> {
         await _appendLocalTurn(
           userText: choice.label,
           response: AiTutorResponse.local(
-            response:
-                'Écris le nom exact de la leçon ou du chapitre que tu veux apprendre.',
+            response: _tr(
+              'Écris le nom exact de la leçon ou du chapitre que tu veux apprendre.',
+              'Soraty mazava ny anaran’ny lesona na toko tianao hianarana.',
+            ),
             flow: 'custom_lesson_topic',
           ),
         );
         return;
       }
-      final data = _topicFromChoice(choice.id);
+      final data = _topicFromChoice(choice.id, malagasy: _isMalagasy);
       _selectedSubject = data.$1;
       _selectedTopic = data.$2;
       final preset = _presetActivity;
@@ -628,7 +705,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final lesson = _activeLesson.copyWith(
         step: 3,
         totalSteps: 3,
-        stage: 'Jeu et quiz',
+        stage: _stageForStep(3, malagasy: _isMalagasy),
         activity: gameType,
         awaitingAnswer: false,
         completed: false,
@@ -649,14 +726,16 @@ class _ChatScreenState extends State<ChatScreen> {
       final lesson = _activeLesson.copyWith(
         step: 2,
         totalSteps: 3,
-        stage: 'Exercice',
+        stage: _stageForStep(2, malagasy: _isMalagasy),
         awaitingAnswer: false,
       );
       setState(() => _activeLesson = lesson);
       await _generateTurn(
         visibleUserText: choice.label,
-        modelText:
-            'Commence maintenant un exercice guidé avec 2 ou 3 choix. N’écris aucun numéro d’étape.',
+        modelText: _tr(
+          'Commence maintenant un exercice guidé avec 2 ou 3 choix. N’écris aucun numéro d’étape.',
+          'Atombohy izao ny fanazaran-tena misy tari-dalana sy safidy roa na telo. Soraty amin’ny teny malagasy ihany.',
+        ),
         activeLessonOverride: lesson,
       );
       return;
@@ -673,7 +752,7 @@ class _ChatScreenState extends State<ChatScreen> {
         case 'complete_replay':
           await _startSelectedLesson(
             activity: 'game',
-            visibleUserText: 'Rejouer',
+            visibleUserText: _tr('Rejouer', 'Hilalao indray'),
           );
           return;
       }
@@ -699,7 +778,10 @@ class _ChatScreenState extends State<ChatScreen> {
         imageBytes == null &&
         audioBytes == null) {
       _selectedTopic = clean;
-      _selectedSubject = _subjectFromTopicText(clean);
+      _selectedSubject = _subjectFromTopicText(
+        clean,
+        malagasy: _isMalagasy,
+      );
       final preset = _presetActivity;
       await _startSelectedLesson(
         activity: preset ?? 'lesson',
@@ -713,15 +795,15 @@ class _ChatScreenState extends State<ChatScreen> {
         _activeLesson.isActive &&
         _activeLesson.step <= 1 &&
         _isUnderstandingSignal(clean)) {
-      await _advanceToExercise(clean.isEmpty ? 'Passer à l’exercice' : clean);
+      await _advanceToExercise(clean.isEmpty ? _tr('Passer à l’exercice', 'Hanomboka fanazaran-tena') : clean);
       return;
     }
 
     await _generateTurn(
       visibleUserText: clean.isEmpty
           ? audioBytes != null
-              ? 'Message vocal'
-              : 'Image envoyée'
+              ? _tr('Message vocal', 'Hafatra am-peo')
+              : _tr('Image envoyée', 'Sary nalefa')
           : clean,
       modelText: clean,
       imageBytes: imageBytes,
@@ -923,16 +1005,23 @@ class _ChatScreenState extends State<ChatScreen> {
           debugPrintStack(stackTrace: stackTrace);
           if (mounted) {
             _showSnack(
-              'La manche continue, mais la progression locale n’a pas été sauvegardée.',
+              _tr(
+                'La manche continue, mais la progression locale n’a pas été sauvegardée.',
+                'Mitohy ny fihodinana, saingy tsy voatahiry ny fandrosoana.',
+              ),
             );
           }
         }
       }
 
       if (progressResult.pointsAdded > 0) {
-        final progressLabel = response.lessonCompleted
-            ? 'jeu terminé et progression sauvegardée'
-            : 'manche validée et progression sauvegardée';
+        final progressLabel = _isMalagasy
+            ? response.lessonCompleted
+                ? 'vita ny lalao ary voatahiry ny fandrosoana'
+                : 'voamarina ny fihodinana ary voatahiry ny fandrosoana'
+            : response.lessonCompleted
+                ? 'jeu terminé et progression sauvegardée'
+                : 'manche validée et progression sauvegardée';
         response = response.copyWith(
           response:
               '${response.response}\n\n🏅 **+${progressResult.pointsAdded} XP** — $progressLabel.',
@@ -987,15 +1076,19 @@ class _ChatScreenState extends State<ChatScreen> {
       if (!mounted || localSerial != _generationSerial) return;
       setState(() {
         _isGenerating = false;
+        final stopped = _tr('Génération arrêtée.', 'Najanona ny famoronana valiny.');
         placeholder
-          ..text = 'Génération arrêtée.'
+          ..text = stopped
           ..tutorResponse = AiTutorResponse.local(
-            response: 'Génération arrêtée.',
-            choices: const [
+            response: stopped,
+            choices: [
               TutorChoice(
                 id: 'retry_after_stop',
-                label: 'Réessayer',
-                message: 'Reprends cette étape avec une réponse courte.',
+                label: _tr('Réessayer', 'Andramo indray'),
+                message: _tr(
+                  'Reprends cette étape avec une réponse courte.',
+                  'Avereno ity asa ity amin’ny valiny fohy.',
+                ),
               ),
             ],
           )
@@ -1007,16 +1100,22 @@ class _ChatScreenState extends State<ChatScreen> {
       if (!mounted || localSerial != _generationSerial) return;
       setState(() {
         _isGenerating = false;
+        final timedOut = _tr(
+          'La réponse a pris trop de temps. La session a été nettoyée.',
+          'Ela loatra ny valiny ka naverina tamin’ny laoniny ny fampandehanana.',
+        );
         placeholder
-          ..text = 'La réponse a pris trop de temps. La session a été nettoyée.'
+          ..text = timedOut
           ..tutorResponse = AiTutorResponse.local(
-            response:
-                'La réponse a pris trop de temps. La session a été nettoyée.',
-            choices: const [
+            response: timedOut,
+            choices: [
               TutorChoice(
                 id: 'retry_timeout',
-                label: 'Réessayer',
-                message: 'Reprends cette étape en moins de 100 mots.',
+                label: _tr('Réessayer', 'Andramo indray'),
+                message: _tr(
+                  'Reprends cette étape avec une réponse très courte.',
+                  'Avereno ity asa ity amin’ny valiny tena fohy.',
+                ),
               ),
             ],
           )
@@ -1029,7 +1128,10 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() {
         _isGenerating = false;
         placeholder
-          ..text = 'Une erreur a empêché la réponse : $error'
+          ..text = _tr(
+            'Une erreur a empêché la réponse : $error',
+            'Nisy olana ka tsy afaka namaly. Andramo indray.',
+          )
           ..tutorResponse = null
           ..status = MessageStatus.error
           ..choicesEnabled = false;
@@ -1040,6 +1142,36 @@ class _ChatScreenState extends State<ChatScreen> {
         setState(() => _isGenerating = false);
       }
     }
+  }
+
+  List<TutorChoice> _completionChoices() {
+    return [
+      TutorChoice(
+        id: 'complete_replay',
+        label: _tr('🎮 Rejouer', '🎮 Hilalao indray'),
+        message: _tr(
+          'Je veux refaire un mini-jeu de 2 questions.',
+          'Te hilalao indray lalao fohy misy fanontaniana 2 aho.',
+        ),
+      ),
+      if (!_isGuestMode)
+        TutorChoice(
+          id: 'complete_progress',
+          label: _tr('📈 Voir ma progression', '📈 Hijery ny fandrosoako'),
+          message: _tr(
+            'Affiche ma progression.',
+            'Asehoy ny fandrosoako.',
+          ),
+        ),
+      TutorChoice(
+        id: 'complete_new_lesson',
+        label: _tr('📚 Nouvelle leçon', '📚 Lesona vaovao'),
+        message: _tr(
+          'Je veux commencer une nouvelle leçon.',
+          'Te hanomboka lesona vaovao aho.',
+        ),
+      ),
+    ];
   }
 
   AiTutorResponse _sanitizeLessonTransition(
@@ -1072,10 +1204,16 @@ class _ChatScreenState extends State<ChatScreen> {
         save: true,
         skillId:
             '${_slug(previous.topic)}_${_slug(previous.activity)}',
-        skillLabel: '${_gameLabel(previous.activity)} — ${previous.topic}',
+        skillLabel: '${_gameLabel(previous.activity, malagasy: _isMalagasy)} — ${previous.topic}',
         evidence: isFinalRound
-            ? 'Manche finale enregistrée localement après une réponse interrompue.'
-            : 'Manche ${previous.gameQuestion} enregistrée localement après une réponse interrompue.',
+            ? _tr(
+                'Manche finale enregistrée localement après une réponse interrompue.',
+                'Voatahiry teo an-toerana ny fihodinana farany taorian’ny fahatapahan’ny valiny.',
+              )
+            : _tr(
+                'Manche ${previous.gameQuestion} enregistrée localement après une réponse interrompue.',
+                'Voatahiry teo an-toerana ny fihodinana ${previous.gameQuestion} taorian’ny fahatapahan’ny valiny.',
+              ),
         correct: null,
         score: isFinalRound ? previous.gameCorrect : 0,
         maxScore: isFinalRound ? total : 0,
@@ -1087,30 +1225,16 @@ class _ChatScreenState extends State<ChatScreen> {
       if (isFinalRound) {
         return response.copyWith(
           response: _decorateGameComplete(
-            text:
-                'La correction détaillée a été écourtée, mais ta dernière manche a bien été enregistrée.',
+            text: _tr(
+              'La correction détaillée a été écourtée, mais ta dernière manche a bien été enregistrée.',
+              'Tapaka ny fanitsiana amin’ny antsipiriany, fa voatahiry tsara ny fihodinana farany.',
+            ),
             activity: previous.activity,
             score: previous.gameCorrect,
             total: total,
+            malagasy: _isMalagasy,
           ),
-          choices: [
-            const TutorChoice(
-              id: 'complete_replay',
-              label: '🎮 Rejouer',
-              message: 'Je veux refaire un mini-jeu de 2 questions.',
-            ),
-            if (!_isGuestMode)
-              const TutorChoice(
-                id: 'complete_progress',
-                label: '📈 Voir ma progression',
-                message: 'Affiche ma progression.',
-              ),
-            const TutorChoice(
-              id: 'complete_new_lesson',
-              label: '📚 Nouvelle leçon',
-              message: 'Je veux commencer une nouvelle leçon.',
-            ),
-          ],
+          choices: _completionChoices(),
           lesson: recoveredLesson,
           progress: recoveredProgress,
           flow: 'lesson_complete',
@@ -1120,14 +1244,20 @@ class _ChatScreenState extends State<ChatScreen> {
       }
 
       return response.copyWith(
-        response:
-            'La correction détaillée a été écourtée, mais la manche ${previous.gameQuestion} est enregistrée. Continuons avec la manche ${previous.gameQuestion + 1}.',
+        response: _tr(
+          'La correction détaillée a été écourtée, mais la manche ${previous.gameQuestion} est enregistrée. Continuons avec la manche ${previous.gameQuestion + 1}.',
+          'Tapaka ny fanitsiana amin’ny antsipiriany, fa voatahiry ny fihodinana ${previous.gameQuestion}. Tohizantsika amin’ny fihodinana ${previous.gameQuestion + 1}.',
+        ),
         choices: [
           TutorChoice(
             id: 'game_continue_recovery',
-            label: '▶ Manche ${previous.gameQuestion + 1}',
-            message:
-                'Génère uniquement la manche ${previous.gameQuestion + 1} sur $total avec une question très courte et 2 ou 3 choix.',
+            label: _isMalagasy
+                ? '▶ Fihodinana ${previous.gameQuestion + 1}'
+                : '▶ Manche ${previous.gameQuestion + 1}',
+            message: _tr(
+              'Génère uniquement la manche ${previous.gameQuestion + 1} sur $total avec une question très courte et 2 ou 3 choix.',
+              'Mamoròna ny fihodinana ${previous.gameQuestion + 1} amin’ny $total ihany, misy fanontaniana tena fohy sy safidy roa na telo.',
+            ),
           ),
         ],
         lesson: recoveredLesson,
@@ -1163,13 +1293,14 @@ class _ChatScreenState extends State<ChatScreen> {
       gameQuestion = gameQuestion <= 0 ? 1 : gameQuestion;
 
       if (!canEvaluate) {
-        choices = _normalizedGameChoices(choices, previous.activity);
+        choices = _normalizedGameChoices(choices, previous.activity, malagasy: _isMalagasy);
         flow = 'game_round';
         action = 'wait_answer';
         text = _decorateGameRound(
           text: text,
           activity: previous.activity,
           question: gameQuestion,
+          malagasy: _isMalagasy,
         );
       } else {
         if (inferredCorrect == true) gameCorrect++;
@@ -1183,28 +1314,12 @@ class _ChatScreenState extends State<ChatScreen> {
             score: gameCorrect,
             total: gameTotal,
             lastCorrect: inferredCorrect,
+            malagasy: _isMalagasy,
           );
-          choices = [
-            const TutorChoice(
-              id: 'complete_replay',
-              label: '🎮 Rejouer',
-              message: 'Je veux refaire un mini-jeu de 2 questions.',
-            ),
-            if (!_isGuestMode)
-              const TutorChoice(
-                id: 'complete_progress',
-                label: '📈 Voir ma progression',
-                message: 'Affiche ma progression.',
-              ),
-            const TutorChoice(
-              id: 'complete_new_lesson',
-              label: '📚 Nouvelle leçon',
-              message: 'Je veux commencer une nouvelle leçon.',
-            ),
-          ];
+          choices = _completionChoices();
         } else {
           gameQuestion++;
-          choices = _normalizedGameChoices(choices, previous.activity);
+          choices = _normalizedGameChoices(choices, previous.activity, malagasy: _isMalagasy);
           flow = 'game_round';
           action = 'wait_answer';
           text = _decorateGameRound(
@@ -1212,6 +1327,7 @@ class _ChatScreenState extends State<ChatScreen> {
             activity: previous.activity,
             question: gameQuestion,
             previousCorrect: inferredCorrect,
+            malagasy: _isMalagasy,
           );
         }
       }
@@ -1225,11 +1341,14 @@ class _ChatScreenState extends State<ChatScreen> {
         step++;
         if (step == 2) {
           flow = 'exercise_start';
-          choices = const [
+          choices = [
             TutorChoice(
               id: 'start_exercise',
-              label: 'Commencer l’exercice',
-              message: 'Commence maintenant un exercice guidé sur cette notion.',
+              label: _tr('Commencer l’exercice', 'Hanomboka fanazaran-tena'),
+              message: _tr(
+                'Commence maintenant un exercice guidé sur cette notion.',
+                'Atombohy izao ny fanazaran-tena misy tari-dalana momba ity hevitra ity.',
+              ),
             ),
           ];
           action = 'wait_answer';
@@ -1251,7 +1370,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final lesson = previous.copyWith(
       step: step,
       totalSteps: 3,
-      stage: _stageForStep(step),
+      stage: _stageForStep(step, malagasy: _isMalagasy),
       awaitingAnswer: awaiting,
       completed: completed,
       gameQuestion: gameQuestion,
@@ -1273,9 +1392,13 @@ class _ChatScreenState extends State<ChatScreen> {
           : rawEvidence;
       final fallbackEvidence = isGameAnswer
           ? completed
-              ? '${_gameLabel(previous.activity)} terminé : score $gameCorrect/$gameTotal.'
-              : 'Manche ${previous.gameQuestion.clamp(1, gameTotal)} sur $gameTotal validée.'
-          : 'Réponse évaluée pendant ${_stageForStep(previous.step).toLowerCase()}.';
+              ? '${_gameLabel(previous.activity, malagasy: _isMalagasy)} ${_isMalagasy ? 'vita' : 'terminé'} : ${_isMalagasy ? 'isa' : 'score'} $gameCorrect/$gameTotal.'
+              : _isMalagasy
+                  ? 'Voamarina ny fihodinana ${previous.gameQuestion.clamp(1, gameTotal)} amin’ny $gameTotal.'
+                  : 'Manche ${previous.gameQuestion.clamp(1, gameTotal)} sur $gameTotal validée.'
+          : _isMalagasy
+              ? 'Voamarina ny valiny nandritra ny ${_stageForStep(previous.step, malagasy: true).toLowerCase()}.'
+              : 'Réponse évaluée pendant ${_stageForStep(previous.step).toLowerCase()}.';
       final modelProgress = evaluatedProgress;
       final knownRoundScore = inferredCorrect == null
           ? 0
@@ -1293,9 +1416,9 @@ class _ChatScreenState extends State<ChatScreen> {
                 ? '${_slug(previous.topic)}_step_${previous.step}'
                 : modelProgress.skillId,
         skillLabel: isGameAnswer
-            ? '${_gameLabel(previous.activity)} — ${previous.topic}'
+            ? '${_gameLabel(previous.activity, malagasy: _isMalagasy)} — ${previous.topic}'
             : modelProgress.skillLabel.trim().isEmpty
-                ? '${_stageForStep(previous.step)} — ${previous.topic}'
+                ? '${_stageForStep(previous.step, malagasy: _isMalagasy)} — ${previous.topic}'
                 : modelProgress.skillLabel,
         evidence: modelProgress.evidence.trim().isEmpty
             ? clippedEvidence.trim().isEmpty
@@ -1343,15 +1466,19 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       _isGenerating = false;
       for (final message in streaming) {
+        final stopped = _tr('Génération arrêtée.', 'Najanona ny famoronana valiny.');
         message
-          ..text = 'Génération arrêtée.'
+          ..text = stopped
           ..tutorResponse = AiTutorResponse.local(
-            response: 'Génération arrêtée.',
-            choices: const [
+            response: stopped,
+            choices: [
               TutorChoice(
                 id: 'retry_stop',
-                label: 'Réessayer',
-                message: 'Reprends la dernière étape avec une réponse courte.',
+                label: _tr('Réessayer', 'Andramo indray'),
+                message: _tr(
+                  'Reprends la dernière étape avec une réponse courte.',
+                  'Avereno ny asa farany amin’ny valiny fohy.',
+                ),
               ),
             ],
           )
@@ -1508,8 +1635,23 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _setLanguageMode(AudioLanguageMode mode) async {
-    setState(() => _languageMode = mode);
-    await _db.saveLanguageMode(mode);
+    final normalized = mode.normalized;
+    if (_languageMode == normalized) return;
+    setState(() => _languageMode = normalized);
+    await _db.saveLanguageMode(normalized);
+
+    // Une nouvelle session évite que la langue des anciens tours influence
+    // les prochaines explications, exercices ou manches de jeu.
+    if (_modelReady && !_isGenerating) {
+      await _gemma.resetConversationSession(conversationId: _conversationId);
+    }
+    if (mounted) {
+      _showSnack(
+        normalized.isMalagasy
+            ? 'Ny valin’i Mpanabe AI rehetra dia amin’ny teny malagasy.'
+            : 'Toutes les réponses de Mpanabe AI seront en français.',
+      );
+    }
   }
 
   void _showSnack(String message) {
@@ -1870,8 +2012,10 @@ class _ChatScreenState extends State<ChatScreen> {
                       () => _appendLocalTurn(
                         userText: 'Traduire en Malagasy',
                         response: AiTutorResponse.local(
-                          response:
-                              'Écris le texte que tu veux traduire en malagasy.',
+                          response: _tr(
+                            'Écris le texte que tu veux traduire en malagasy.',
+                            'Soraty ny lahatsoratra tianao hadika amin’ny teny malagasy.',
+                          ),
                         ),
                       ),
                       const Color(0xFFFFB800),
@@ -1922,27 +2066,34 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Widget _buildPersistentMenu() {
     final actions = <(IconData, String, VoidCallback)>[
-      (Icons.menu_book_rounded, 'Leçon', _startLessonSetup),
+      (Icons.menu_book_rounded, _tr('Leçon', 'Lesona'), _startLessonSetup),
       (
         Icons.psychology_alt_rounded,
-        'Exercice',
+        _tr('Exercice', 'Fanazaran-tena'),
         () => _startLessonSetup(presetActivity: 'exercise'),
       ),
       (
         Icons.quiz_rounded,
-        'Quiz',
+        _tr('Quiz', 'Quiz'),
         () => _startLessonSetup(presetActivity: 'quiz'),
       ),
       (
         Icons.sports_esports_rounded,
-        'Jeu',
+        _tr('Jeu', 'Lalao'),
         () => _startLessonSetup(presetActivity: 'game'),
       ),
+      (
+        Icons.cloud_outlined,
+        _tr('En ligne', 'An-tserasera'),
+        () {
+          _openOnlineTools();
+        },
+      ),
       if (!_isGuestMode)
-        (Icons.trending_up_rounded, 'Progression', _showProgress),
+        (Icons.trending_up_rounded, _tr('Progression', 'Fandrosoana'), _showProgress),
       (
         Icons.history_rounded,
-        'Discussions',
+        _tr('Discussions', 'Resaka'),
         () => _scaffoldKey.currentState?.openDrawer(),
       ),
     ];
@@ -1968,6 +2119,23 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           );
         },
+      ),
+    );
+  }
+
+  Future<void> _openOnlineTools({int initialTab = 0}) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => OnlineToolsScreen(
+          languageMode: _languageMode,
+          initialSubject: _activeLesson.subject.isNotEmpty
+              ? _activeLesson.subject
+              : _selectedSubject,
+          initialTopic: _activeLesson.topic.isNotEmpty
+              ? _activeLesson.topic
+              : _selectedTopic,
+          initialTab: initialTab,
+        ),
       ),
     );
   }
@@ -2154,6 +2322,29 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               ),
             const Divider(height: 1),
+            ListTile(
+              leading: const Icon(
+                Icons.cloud_outlined,
+                color: AppTheme.accent,
+              ),
+              title: Text(
+                _tr('Outils en ligne', 'Fitaovana an-tserasera'),
+                style: const TextStyle(
+                  color: AppTheme.textPrimary,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              subtitle: Text(
+                _tr(
+                  'Analyse de copies et tutoriel vidéo',
+                  'Fanadihadiana valin’asa sy horonan-tsary',
+                ),
+              ),
+              onTap: () {
+                Navigator.of(context).pop();
+                _openOnlineTools();
+              },
+            ),
             if (!_isGuestMode)
               ListTile(
                 leading: const Icon(
@@ -2192,10 +2383,10 @@ class _ChatScreenState extends State<ChatScreen> {
               child: DropdownButtonFormField<AudioLanguageMode>(
                 value: _languageMode,
                 decoration: const InputDecoration(
-                  labelText: 'Langue vocale',
+                  labelText: 'Langue des réponses',
                   border: OutlineInputBorder(),
                 ),
-                items: AudioLanguageMode.values
+                items: selectableAudioLanguageModes
                     .map(
                       (mode) => DropdownMenuItem(
                         value: mode,
@@ -2340,7 +2531,24 @@ String _conversationGroupLabel(int timestamp) {
   return 'Plus ancien';
 }
 
-(String, String) _topicFromChoice(String id) {
+(String, String) _topicFromChoice(
+  String id, {
+  bool malagasy = false,
+}) {
+  if (malagasy) {
+    switch (id) {
+      case 'topic_fractions':
+        return ('Kajy', 'Ampahany');
+      case 'topic_multiplication':
+        return ('Kajy', 'Fampitomboana');
+      case 'topic_conjugaison':
+        return ('Teny frantsay', 'Fampiasana matoanteny');
+      case 'topic_sciences':
+        return ('Siansa', 'Siansa voajanahary');
+      default:
+        return ('Hafa', 'Lesona nofidina');
+    }
+  }
   switch (id) {
     case 'topic_fractions':
       return ('Mathématiques', 'Fractions');
@@ -2355,7 +2563,19 @@ String _conversationGroupLabel(int timestamp) {
   }
 }
 
-String _activityLabel(String activity) {
+String _activityLabel(String activity, {bool malagasy = false}) {
+  if (malagasy) {
+    switch (activity) {
+      case 'exercise':
+        return 'Hanao fanazaran-tena';
+      case 'quiz':
+        return 'Hanao lalao fanontaniana';
+      case 'game':
+        return 'Hamorona lalao fanabeazana';
+      default:
+        return 'Hianatra lesona';
+    }
+  }
   switch (activity) {
     case 'exercise':
       return 'Faire un exercice';
@@ -2368,7 +2588,17 @@ String _activityLabel(String activity) {
   }
 }
 
-String _stageForStep(int step) {
+String _stageForStep(int step, {bool malagasy = false}) {
+  if (malagasy) {
+    switch (step) {
+      case 1:
+        return 'Fanazavana';
+      case 2:
+        return 'Fanazaran-tena';
+      default:
+        return 'Lalao sy fanontaniana';
+    }
+  }
   switch (step) {
     case 1:
       return 'Explication';
@@ -2387,34 +2617,47 @@ String _slug(String value) {
   return result.isEmpty ? 'lesson' : result;
 }
 
-String _subjectFromTopicText(String value) {
+String _subjectFromTopicText(String value, {bool malagasy = false}) {
   final text = value.toLowerCase();
-  if (RegExp(r'fraction|calcul|nombre|équation|equation|géométr|geometr|multipli|division')
+  if (RegExp(
+    r'fraction|ampahany|calcul|kajy|nombre|isa|équation|equation|géométr|geometr|multipli|fampitomboana|division|fizarana',
+  ).hasMatch(text)) {
+    return malagasy ? 'Kajy' : 'Mathématiques';
+  }
+  if (RegExp(
+    r'français|francais|teny frantsay|grammaire|fitsipi-pitenenana|conjug|matoanteny|orthographe|tsipelina|rédaction|redaction',
+  ).hasMatch(text)) {
+    return malagasy ? 'Teny frantsay' : 'Français';
+  }
+  if (RegExp(r'anglais|english|teny anglisy|vocabulaire anglais')
       .hasMatch(text)) {
-    return 'Mathématiques';
+    return malagasy ? 'Teny anglisy' : 'Anglais';
   }
-  if (RegExp(r'français|francais|grammaire|conjug|orthographe|rédaction|redaction')
+  if (RegExp(r'science|siansa|physique|fizika|chimie|simia|biologie|svt')
       .hasMatch(text)) {
-    return 'Français';
+    return malagasy ? 'Siansa' : 'Sciences';
   }
-  if (RegExp(r'anglais|english|vocabulaire anglais').hasMatch(text)) {
-    return 'Anglais';
-  }
-  if (RegExp(r'science|physique|chimie|biologie|svt').hasMatch(text)) {
-    return 'Sciences';
-  }
-  return 'Autre';
+  return malagasy ? 'Hafa' : 'Autre';
 }
 
 List<TutorChoice> _normalizedGameChoices(
   List<TutorChoice> choices,
-  String activity,
-) {
+  String activity, {
+  bool malagasy = false,
+}) {
   final game = activity.toLowerCase();
   if (game == 'true_false' || game == 'truefalse' || game == 'vrai_faux') {
-    return const [
-      TutorChoice(id: 'game_true', label: '✅ Vrai', message: 'Vrai'),
-      TutorChoice(id: 'game_false', label: '❌ Faux', message: 'Faux'),
+    return [
+      TutorChoice(
+        id: 'game_true',
+        label: malagasy ? '✅ Marina' : '✅ Vrai',
+        message: malagasy ? 'Marina' : 'Vrai',
+      ),
+      TutorChoice(
+        id: 'game_false',
+        label: malagasy ? '❌ Diso' : '❌ Faux',
+        message: malagasy ? 'Diso' : 'Faux',
+      ),
     ];
   }
 
@@ -2423,20 +2666,25 @@ List<TutorChoice> _normalizedGameChoices(
     return !label.contains("j'ai compris") &&
         !label.contains('jai compris') &&
         !label.contains('as-tu compris') &&
-        !label.contains('avez-vous compris');
+        !label.contains('avez-vous compris') &&
+        !label.contains('azonao ve');
   }).take(3).toList(growable: false);
 
   if (filtered.isNotEmpty) return filtered;
-  return const [
+  return [
     TutorChoice(
       id: 'game_hint',
-      label: '💡 Indice',
-      message: 'Donne un indice court et répète la même question.',
+      label: malagasy ? '💡 Soso-kevitra' : '💡 Indice',
+      message: malagasy
+          ? 'Omeo soso-kevitra fohy ary avereno ilay fanontaniana.'
+          : 'Donne un indice court et répète la même question.',
     ),
     TutorChoice(
       id: 'game_skip',
-      label: '⏭️ Passer',
-      message: 'Je passe cette question.',
+      label: malagasy ? '⏭️ Mandalo' : '⏭️ Passer',
+      message: malagasy
+          ? 'Handalo ity fanontaniana ity aho.'
+          : 'Je passe cette question.',
     ),
   ];
 }
@@ -2446,15 +2694,20 @@ String _decorateGameRound({
   required String activity,
   required int question,
   bool? previousCorrect,
+  bool malagasy = false,
 }) {
   final parts = <String>[
-    '## ${_gameEmoji(activity)} ${_gameLabel(activity)}',
-    '**Manche $question sur 2**',
+    '## ${_gameEmoji(activity)} ${_gameLabel(activity, malagasy: malagasy)}',
+    malagasy ? '**Fihodinana $question amin’ny 2**' : '**Manche $question sur 2**',
   ];
   if (previousCorrect == true) {
-    parts.add('✅ **Bien joué !** Bonne réponse.');
+    parts.add(malagasy
+        ? '✅ **Tsara!** Marina ny valinao.'
+        : '✅ **Bien joué !** Bonne réponse.');
   } else if (previousCorrect == false) {
-    parts.add('💡 **Presque !** On continue, tu peux te rattraper.');
+    parts.add(malagasy
+        ? '💡 **Saika marina!** Tohizo fa mbola afaka manarina ianao.'
+        : '💡 **Presque !** On continue, tu peux te rattraper.');
   }
   final body = normalizeTutorMarkdown(text);
   if (body.isNotEmpty) parts.add(body);
@@ -2467,26 +2720,55 @@ String _decorateGameComplete({
   required int score,
   required int total,
   bool? lastCorrect,
+  bool malagasy = false,
 }) {
   final parts = <String>[
-    '## 🏁 ${_gameLabel(activity)} terminé',
+    malagasy
+        ? '## 🏁 Vita ny ${_gameLabel(activity, malagasy: true)}'
+        : '## 🏁 ${_gameLabel(activity)} terminé',
     if (lastCorrect == true)
-      '✅ **Bonne dernière réponse !**'
+      malagasy
+          ? '✅ **Marina ny valiny farany!**'
+          : '✅ **Bonne dernière réponse !**'
     else if (lastCorrect == false)
-      '💡 **Dernière réponse manquée, mais la partie est terminée.**',
-    '**Score : $score/$total**',
+      malagasy
+          ? '💡 **Diso ny valiny farany, fa vita ny lalao.**'
+          : '💡 **Dernière réponse manquée, mais la partie est terminée.**',
+    malagasy ? '**Isa: $score/$total**' : '**Score : $score/$total**',
   ];
   final body = normalizeTutorMarkdown(text);
   if (body.isNotEmpty) parts.add(body);
-  parts.add(score == total
-      ? '🌟 Excellent ! Tu maîtrises bien cette notion.'
-      : score > 0
-          ? '👏 Bien joué ! Un nouvel essai peut améliorer ton score.'
-          : '💪 Ce n’est qu’un début. Rejoue pour progresser.');
+  parts.add(
+    malagasy
+        ? score == total
+            ? '🌟 Tena tsara! Voafehinao tsara ity lohahevitra ity.'
+            : score > 0
+                ? '👏 Tsara! Afaka manatsara ny isa ianao raha milalao indray.'
+                : '💪 Fanombohana ihany izao. Milalaova indray mba handroso.'
+        : score == total
+            ? '🌟 Excellent ! Tu maîtrises bien cette notion.'
+            : score > 0
+                ? '👏 Bien joué ! Un nouvel essai peut améliorer ton score.'
+                : '💪 Ce n’est qu’un début. Rejoue pour progresser.',
+  );
   return parts.join('\n\n');
 }
 
-String _gameLabel(String activity) {
+String _gameLabel(String activity, {bool malagasy = false}) {
+  if (malagasy) {
+    switch (activity.toLowerCase()) {
+      case 'memory':
+        return 'Lalao fitadidiana';
+      case 'chrono':
+        return 'Fanamby ara-potoana';
+      case 'true_false':
+      case 'truefalse':
+      case 'vrai_faux':
+        return 'Marina sa diso';
+      default:
+        return 'Lalao fanontaniana fohy';
+    }
+  }
   switch (activity.toLowerCase()) {
     case 'memory':
       return 'Mémoire';

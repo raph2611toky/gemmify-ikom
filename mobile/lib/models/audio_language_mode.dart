@@ -1,99 +1,85 @@
 enum AudioLanguageMode {
   malagasy,
+
+  /// Conservé uniquement pour relire les anciennes données SQLite.
+  /// L'interface ne propose plus ce mode ambigu.
   mixed,
   french,
 }
 
+/// Les deux seuls choix visibles dans l'application.
+const List<AudioLanguageMode> selectableAudioLanguageModes = [
+  AudioLanguageMode.french,
+  AudioLanguageMode.malagasy,
+];
+
 extension AudioLanguageModeX on AudioLanguageMode {
+  bool get isMalagasy => this == AudioLanguageMode.malagasy;
+
+  /// Toute ancienne valeur `mixed` est ramenée vers le français afin que
+  /// chaque discussion ait désormais une langue unique et prévisible.
+  AudioLanguageMode get normalized =>
+      this == AudioLanguageMode.mixed ? AudioLanguageMode.french : this;
+
   String get label {
-    switch (this) {
+    switch (normalized) {
       case AudioLanguageMode.malagasy:
         return 'Malagasy';
-      case AudioLanguageMode.mixed:
-        return 'Malagasy + français';
       case AudioLanguageMode.french:
+        return 'Français';
+      case AudioLanguageMode.mixed:
         return 'Français';
     }
   }
 
-  String get shortLabel {
-    switch (this) {
-      case AudioLanguageMode.malagasy:
-        return 'MG';
-      case AudioLanguageMode.mixed:
-        return 'MG + FR';
-      case AudioLanguageMode.french:
-        return 'FR';
-    }
-  }
+  String get shortLabel => isMalagasy ? 'MG' : 'FR';
 
-  String get storageValue => name;
+  String get storageValue => normalized.name;
 
   String get transcriptionInstruction {
-    switch (this) {
-      case AudioLanguageMode.malagasy:
-        return '''
+    if (isMalagasy) {
+      return '''
 Ny mpiteny dia miteny amin'ny teny malagasy.
-Adikao ho soratra malagasy marina ilay feo.
+Soraty amin'ny teny malagasy marina ilay feo.
 Aza adika amin'ny teny frantsay na anglisy.
-Tehirizo araka izay azo atao ny fomba fiteny sy ny anaran-toerana malagasy.
+Tehirizo araka izay azo atao ny anarana, ny isa, ny raikipohy ary ny mari-pamantarana.
 Raha misy teny tsy mazava dia soraty hoe [tsy mazava].
 Aza manampy fanazavana na valiny: ny transcription ihany no averina.
 ''';
-      case AudioLanguageMode.mixed:
-        return '''
-Ny mpiteny dia mety hampifangaro teny malagasy sy teny frantsay, indrindra ireo voambolana ampiasaina any an-tsekoly.
-Adikao marina ilay feo ary aza adika ireo teny teknika frantsay.
-Tehirizo ny teny malagasy, ny anarana, ny formule ary ny voambolana toy ny équation, fonction, dérivée, théorème, cellule, énergie, grammaire.
-Raha misy teny tsy mazava dia soraty hoe [tsy mazava].
-Aza manampy fanazavana na valiny: ny transcription ihany no averina.
-''';
-      case AudioLanguageMode.french:
-        return '''
+    }
+    return '''
 La personne parle principalement français.
 Transcris exactement le message en français.
-Conserve les mots malagasy éventuellement prononcés.
+Conserve les noms, nombres, formules et symboles.
 Si un mot est incompréhensible, écris [inaudible].
 Ne donne aucune explication ni réponse : retourne uniquement la transcription.
 ''';
-    }
   }
 
   String get responseInstruction {
-    switch (this) {
-      case AudioLanguageMode.malagasy:
-        return '''
-Valio amin'ny teny malagasy mazava sy tsotra.
-Hazavao tsikelikely toy ny mpampianatra manam-paharetana.
-Afaka mampiasa teny teknika frantsay mahazatra any an-tsekoly rehefa ilaina, saingy hazavao amin'ny teny malagasy.
-''';
-      case AudioLanguageMode.mixed:
-        return '''
-Valio amin'ny teny malagasy mazava, ary tehirizo ireo voambolana teknika frantsay mahazatra any an-tsekoly.
-Hazavao tsikelikely ary omeo ohatra mifanaraka amin'ny mpianatra eto Madagasikara.
-''';
-      case AudioLanguageMode.french:
-        return '''
-Réponds en français clair et pédagogique.
-Explique étape par étape et adapte le vocabulaire au niveau d'un élève.
+    if (isMalagasy) {
+      return '''
+Valio amin'ny teny malagasy ihany.
+Ny fanazavana, fanontaniana, fanitsiana, lalao, safidy ary fampaherezana rehetra dia tsy maintsy amin'ny teny malagasy.
+Aza mampiasa teny na fehezanteny frantsay. Tehirizo fotsiny ny isa, ny raikipohy, ny mari-pamantarana ary ny anarana manokana tsy azo ovaina.
+Hazavao tsotra sy fohy toy ny mpampianatra manam-paharetana.
+Ho an'ny marina na diso dia ampiasao ny safidy « Marina » sy « Diso ».
 ''';
     }
+    return '''
+Réponds uniquement en français clair et pédagogique.
+Les explications, questions, corrections, jeux, choix et encouragements doivent tous être en français.
+Explique brièvement et adapte le vocabulaire au niveau de l'élève.
+''';
   }
 
-  List<String> get preferredTtsLocales {
-    switch (this) {
-      case AudioLanguageMode.malagasy:
-      case AudioLanguageMode.mixed:
-        return const ['mg-MG', 'fr-FR'];
-      case AudioLanguageMode.french:
-        return const ['fr-FR'];
-    }
-  }
+  List<String> get preferredTtsLocales =>
+      isMalagasy ? const ['mg-MG', 'fr-FR'] : const ['fr-FR'];
 }
 
 AudioLanguageMode audioLanguageModeFromStorage(String? value) {
-  for (final mode in AudioLanguageMode.values) {
-    if (mode.storageValue == value) return mode;
+  if (value == AudioLanguageMode.malagasy.name) {
+    return AudioLanguageMode.malagasy;
   }
-  return AudioLanguageMode.mixed;
+  return AudioLanguageMode.french;
 }

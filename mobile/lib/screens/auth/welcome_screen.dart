@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../core/app_assets.dart';
+import '../../models/audio_language_mode.dart';
 import '../../services/local_learning_database.dart';
 import '../../theme/app_theme.dart';
 import '../app_entry_screen.dart';
@@ -15,13 +16,15 @@ class WelcomeScreen extends StatefulWidget {
 }
 
 class _WelcomeScreenState extends State<WelcomeScreen> {
-  String _language = 'Français';
+  AudioLanguageMode _languageMode = AudioLanguageMode.french;
   bool _busy = false;
 
   Future<void> _continueWithoutAccount() async {
     if (_busy) return;
     setState(() => _busy = true);
-    await LocalLearningDatabase.instance.enterGuestMode();
+    await LocalLearningDatabase.instance.enterGuestMode(
+      languageMode: _languageMode,
+    );
     if (!mounted) return;
     Navigator.of(context).pushReplacement(
       MaterialPageRoute<void>(builder: (_) => const AppEntryScreen()),
@@ -57,9 +60,9 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
                         Align(
                           alignment: Alignment.centerRight,
                           child: _LanguagePicker(
-                            value: _language,
+                            value: _languageMode,
                             onChanged: (value) =>
-                                setState(() => _language = value),
+                                setState(() => _languageMode = value),
                           ),
                         ),
                         SizedBox(height: compact ? 8 : 14),
@@ -133,13 +136,17 @@ class _WelcomeScreenState extends State<WelcomeScreen> {
                         _PrimaryAuthButton(
                           icon: Icons.login_rounded,
                           label: 'Se connecter',
-                          onPressed: () => _open(const LoginScreen()),
+                          onPressed: () => _open(
+                            LoginScreen(initialLanguageMode: _languageMode),
+                          ),
                         ),
                         const SizedBox(height: 10),
                         _OutlineAuthButton(
                           icon: Icons.person_add_alt_1_rounded,
                           label: 'Créer un compte',
-                          onPressed: () => _open(const RegisterScreen()),
+                          onPressed: () => _open(
+                            RegisterScreen(initialLanguageMode: _languageMode),
+                          ),
                         ),
                         const SizedBox(height: 6),
                         TextButton(
@@ -240,8 +247,8 @@ class _PoweredBadge extends StatelessWidget {
 }
 
 class _LanguagePicker extends StatelessWidget {
-  final String value;
-  final ValueChanged<String> onChanged;
+  final AudioLanguageMode value;
+  final ValueChanged<AudioLanguageMode> onChanged;
 
   const _LanguagePicker({required this.value, required this.onChanged});
 
@@ -255,7 +262,7 @@ class _LanguagePicker extends StatelessWidget {
         borderRadius: BorderRadius.circular(15),
       ),
       child: DropdownButtonHideUnderline(
-        child: DropdownButton<String>(
+        child: DropdownButton<AudioLanguageMode>(
           value: value,
           isDense: true,
           icon: const Icon(
@@ -267,10 +274,14 @@ class _LanguagePicker extends StatelessWidget {
             fontSize: 14,
             fontWeight: FontWeight.w800,
           ),
-          items: const [
-            DropdownMenuItem(value: 'Français', child: Text('Français')),
-            DropdownMenuItem(value: 'Malagasy', child: Text('Malagasy')),
-          ],
+          items: selectableAudioLanguageModes
+              .map(
+                (mode) => DropdownMenuItem<AudioLanguageMode>(
+                  value: mode,
+                  child: Text(mode.label),
+                ),
+              )
+              .toList(growable: false),
           onChanged: (next) {
             if (next != null) onChanged(next);
           },

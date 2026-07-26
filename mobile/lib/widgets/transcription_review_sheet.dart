@@ -125,7 +125,7 @@ class _TranscriptionReviewSheetState
                   labelText: 'Langue parlée',
                   prefixIcon: Icon(Icons.translate_rounded),
                 ),
-                items: AudioLanguageMode.values
+                items: selectableAudioLanguageModes
                     .map(
                       (mode) => DropdownMenuItem(
                         value: mode,

@@ -118,6 +118,15 @@ class LearningOverview {
   }
 }
 
+
+class OnlineApiSettings {
+  final String baseUrl;
+
+  const OnlineApiSettings({
+    this.baseUrl = '',
+  });
+}
+
 class ProgressSaveResult {
   final bool saved;
   final bool positiveEvolution;
@@ -193,11 +202,12 @@ class LocalLearningDatabase {
 
   int? _activeUserId;
   int? _activeConversationId;
-  AudioLanguageMode _languageMode = AudioLanguageMode.mixed;
+  AudioLanguageMode _languageMode = AudioLanguageMode.french;
   Map<String, dynamic>? _localProfile;
   bool _signedIn = false;
   bool _guestMode = false;
   bool _initialized = false;
+  OnlineApiSettings _guestOnlineApiSettings = const OnlineApiSettings();
 
   bool get isGuestModeSync => _guestMode;
 
@@ -206,7 +216,7 @@ class LocalLearningDatabase {
     final base = await getDatabasesPath();
     _database = await openDatabase(
       '$base/gemmafy_learning.db',
-      version: 3,
+      version: 5,
       onConfigure: (db) async {
         await db.execute('PRAGMA foreign_keys = ON');
       },
@@ -215,7 +225,7 @@ class LocalLearningDatabase {
           CREATE TABLE learning_settings (
             user_id INTEGER PRIMARY KEY,
             profile_json TEXT NOT NULL DEFAULT '{}',
-            language_mode TEXT NOT NULL DEFAULT 'mixed',
+            language_mode TEXT NOT NULL DEFAULT 'french',
             active_conversation_id INTEGER,
             updated_at INTEGER NOT NULL
           )
@@ -319,6 +329,14 @@ class LocalLearningDatabase {
           CREATE INDEX completed_activities_user_idx
           ON completed_activities(user_id, completed_at DESC)
         ''');
+        await db.execute('''
+          CREATE TABLE online_api_settings (
+            user_id INTEGER PRIMARY KEY,
+            base_url TEXT NOT NULL DEFAULT '',
+            api_key TEXT NOT NULL DEFAULT '',
+            updated_at INTEGER NOT NULL
+          )
+        ''');
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -330,7 +348,7 @@ class LocalLearningDatabase {
             CREATE TABLE IF NOT EXISTS learning_settings (
               user_id INTEGER PRIMARY KEY,
               profile_json TEXT NOT NULL DEFAULT '{}',
-              language_mode TEXT NOT NULL DEFAULT 'mixed',
+              language_mode TEXT NOT NULL DEFAULT 'french',
               active_conversation_id INTEGER,
               updated_at INTEGER NOT NULL
             )
@@ -474,6 +492,28 @@ class LocalLearningDatabase {
             ON progress_events(user_id, created_at DESC)
           ''');
         }
+        if (oldVersion < 4) {
+          // Le mode mixte n'est plus proposé. Chaque compte utilise maintenant
+          // une langue unique : français ou malagasy.
+          await db.execute(
+            "UPDATE learning_settings SET language_mode = 'french' "
+            "WHERE language_mode IS NULL OR language_mode = '' OR language_mode = 'mixed'",
+          );
+          await db.execute(
+            "UPDATE messages SET language_mode = 'french' "
+            "WHERE language_mode IS NULL OR language_mode = '' OR language_mode = 'mixed'",
+          );
+        }
+        if (oldVersion < 5) {
+          await db.execute('''
+            CREATE TABLE IF NOT EXISTS online_api_settings (
+              user_id INTEGER PRIMARY KEY,
+              base_url TEXT NOT NULL DEFAULT '',
+              api_key TEXT NOT NULL DEFAULT '',
+              updated_at INTEGER NOT NULL
+            )
+          ''');
+        }
       },
     );
     _initialized = true;
@@ -501,25 +541,29 @@ class LocalLearningDatabase {
     _clearGuestData();
     _activeUserId = null;
     _activeConversationId = null;
-    _languageMode = AudioLanguageMode.mixed;
+    _languageMode = AudioLanguageMode.french;
     _localProfile = null;
     _signedIn = false;
     _guestMode = false;
+    _guestOnlineApiSettings = const OnlineApiSettings();
   }
 
-  Future<void> enterGuestMode() async {
+  Future<void> enterGuestMode({
+    AudioLanguageMode languageMode = AudioLanguageMode.french,
+  }) async {
     _clearGuestData();
     _activeUserId = null;
     _activeConversationId = null;
     _signedIn = false;
     _guestMode = true;
     _localProfile = null;
-    _languageMode = AudioLanguageMode.mixed;
+    _languageMode = languageMode.normalized;
   }
 
   Future<void> enterAccountMode({
     int? userId,
     Map<String, dynamic>? profile,
+    AudioLanguageMode? preferredLanguageMode,
   }) async {
     await initialize();
     final authUser = LocalAuthService.instance.currentUserSync;
@@ -552,7 +596,7 @@ class LocalLearningDatabase {
           ? storedProfile
           : Map<String, dynamic>.from(profile);
     } else {
-      _languageMode = AudioLanguageMode.mixed;
+      _languageMode = AudioLanguageMode.french;
       _activeConversationId = null;
       _localProfile = profile == null
           ? Map<String, dynamic>.from(authUser?.profile ?? const {})
@@ -562,6 +606,11 @@ class LocalLearningDatabase {
 
     if (profile != null) {
       _localProfile = Map<String, dynamic>.from(profile);
+      await _upsertSettings();
+    }
+
+    if (preferredLanguageMode != null) {
+      _languageMode = preferredLanguageMode.normalized;
       await _upsertSettings();
     }
   }
@@ -593,7 +642,7 @@ class LocalLearningDatabase {
   }
 
   Future<void> saveLanguageMode(AudioLanguageMode mode) async {
-    _languageMode = mode;
+    _languageMode = mode.normalized;
     if (_accountId != null) await _upsertSettings();
   }
 
@@ -890,7 +939,7 @@ class LocalLearningDatabase {
     required String userModality,
     required AiTutorResponse assistantResponse,
     int? audioDurationMs,
-    AudioLanguageMode languageMode = AudioLanguageMode.mixed,
+    AudioLanguageMode languageMode = AudioLanguageMode.french,
   }) async {
     final now = DateTime.now().millisecondsSinceEpoch;
     final compactUser = _clipInline(userText, 1200);
@@ -1437,6 +1486,51 @@ class LocalLearningDatabase {
       'total_attempts': overview.totalAttempts,
       'total_correct_answers': overview.totalCorrectAnswers,
     };
+  }
+
+  Future<OnlineApiSettings> loadOnlineApiSettings() async {
+    if (_guestMode) return _guestOnlineApiSettings;
+    final userId = _accountId;
+    if (userId == null) return const OnlineApiSettings();
+    final db = await _db();
+    final rows = await db.query(
+      'online_api_settings',
+      where: 'user_id = ?',
+      whereArgs: [userId],
+      limit: 1,
+    );
+    if (rows.isEmpty) return const OnlineApiSettings();
+    return OnlineApiSettings(
+      baseUrl: '${rows.first['base_url'] ?? ''}'.trim(),
+    );
+  }
+
+  Future<void> saveOnlineApiSettings({
+    required String baseUrl,
+  }) async {
+    final settings = OnlineApiSettings(
+      baseUrl: baseUrl.trim(),
+    );
+    if (_guestMode) {
+      _guestOnlineApiSettings = settings;
+      return;
+    }
+    final userId = _accountId;
+    if (userId == null) {
+      throw StateError('Aucun compte local actif.');
+    }
+    final db = await _db();
+    await db.insert(
+      'online_api_settings',
+      {
+        'user_id': userId,
+        'base_url': settings.baseUrl,
+        // Colonne historique conservée uniquement pour la compatibilité SQLite.
+        'api_key': '',
+        'updated_at': DateTime.now().millisecondsSinceEpoch,
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
   }
 
   Future<void> runMaintenance() async {
