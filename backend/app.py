@@ -1,7 +1,20 @@
+# app.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 
 from apps.urls import router
+
+import os
+
+
+BASE_DIR = Path(__file__).resolve().parent
+MEDIA_DIR = os.path.join(BASE_DIR, "media")
+
+os.makedirs(os.path.join(MEDIA_DIR, "tutorials"), exist_ok=True)
+os.makedirs(os.path.join(MEDIA_DIR, "temp"), exist_ok=True)
+os.makedirs(os.path.join(MEDIA_DIR, "videos", "audios"), exist_ok=True)
 
 
 app = FastAPI(
@@ -21,7 +34,15 @@ app.add_middleware(
 )
 
 
+app.mount(
+    "/media",
+    StaticFiles(directory=MEDIA_DIR),
+    name="media"
+)
+
+
 app.include_router(router)
+
 
 if __name__ == "__main__":
     import uvicorn
