@@ -12,10 +12,27 @@ import os
 import traceback
 
 
+BASE_DIR  = Path(__file__).resolve().parent.parent
+MEDIA_DIR = os.path.join(BASE_DIR, "media")
+RAKIBOLANA_PATH = os.path.join(MEDIA_DIR, "rakibolana-dikan-teny-vf-vm.pdf")
+
+
+def _get_rakibolana_upload_file() -> UploadFile:
+    f = open(RAKIBOLANA_PATH, "rb")
+    return UploadFile(
+        file=f,
+        filename="rakibolana-dikan-teny-vf-vm.pdf",
+    )
+
+
 # ── Chat MPANABE AI ───────────────────────────────────────────────────────────
 
 async def chat_view(
     texte: Annotated[str, Form(description="Message à envoyer à MPANABE AI")],
+    with_rag: Annotated[
+        bool,
+        Form(description="Si True, attache automatiquement le rakibolana (dictionnaire malagasy) comme source RAG")
+    ] = False,
     fichiers: Annotated[
         List[UploadFile],
         File(description="Fichiers joints (images, PDF, texte, etc.) — optionnel")
@@ -28,6 +45,17 @@ async def chat_view(
             f for f in fichiers
             if f and f.filename and f.filename.strip()
         ]
+
+        if with_rag:
+            if not os.path.exists(RAKIBOLANA_PATH):
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "success": False,
+                        "message": "Fichier RAG (rakibolana) introuvable sur le serveur."
+                    }
+                )
+            fichiers_valides.append(_get_rakibolana_upload_file())
 
         response = await simple_chat_gemma(
             message=texte,
@@ -51,6 +79,7 @@ async def chat_view(
                 "message": str(e)
             }
         )
+
 
 
 # ── Génération de tutoriel vidéo ──────────────────────────────────────────────
