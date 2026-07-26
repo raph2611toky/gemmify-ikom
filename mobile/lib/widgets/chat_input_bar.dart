@@ -323,7 +323,7 @@ class _ChatInputBarState extends State<ChatInputBar> {
       color: AppTheme.background,
       child: SafeArea(
         top: false,
-        minimum: const EdgeInsets.fromLTRB(14, 4, 14, 12),
+        minimum: const EdgeInsets.fromLTRB(12, 4, 12, 10),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -339,8 +339,8 @@ class _ChatInputBarState extends State<ChatInputBar> {
                         borderRadius: BorderRadius.circular(16),
                         child: Image.memory(
                           _pendingImage!,
-                          height: 86,
-                          width: 86,
+                          height: 76,
+                          width: 76,
                           fit: BoxFit.cover,
                         ),
                       ),
@@ -399,11 +399,11 @@ class _ChatInputBarState extends State<ChatInputBar> {
               )
             else
               Container(
-                constraints: const BoxConstraints(minHeight: 62),
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                constraints: const BoxConstraints(minHeight: 56),
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
                 decoration: BoxDecoration(
                   color: AppTheme.surface,
-                  borderRadius: BorderRadius.circular(30),
+                  borderRadius: BorderRadius.circular(28),
                   border: Border.all(color: AppTheme.border),
                   boxShadow: AppTheme.softShadow,
                 ),
@@ -419,8 +419,8 @@ class _ChatInputBarState extends State<ChatInputBar> {
                             },
                       child: AnimatedContainer(
                         duration: const Duration(milliseconds: 180),
-                        width: 46,
-                        height: 46,
+                        width: 42,
+                        height: 42,
                         decoration: BoxDecoration(
                           color: _showAttachments
                               ? AppTheme.accent
@@ -429,7 +429,7 @@ class _ChatInputBarState extends State<ChatInputBar> {
                         ),
                         child: Icon(
                           _showAttachments ? Icons.close_rounded : Icons.add_rounded,
-                          size: 28,
+                          size: 25,
                           color: _showAttachments ? Colors.white : AppTheme.accent,
                         ),
                       ),
@@ -443,14 +443,18 @@ class _ChatInputBarState extends State<ChatInputBar> {
                         enabled: !widget.isGenerating,
                         textCapitalization: TextCapitalization.sentences,
                         style: const TextStyle(
-                          fontSize: 15,
+                          fontSize: 14,
                           color: AppTheme.textPrimary,
                           fontWeight: FontWeight.w600,
                         ),
                         decoration: const InputDecoration(
                           hintText: 'Pose ta question...',
                           isDense: true,
-                          contentPadding: EdgeInsets.symmetric(vertical: 13),
+                          filled: false,
+                          border: InputBorder.none,
+                          enabledBorder: InputBorder.none,
+                          focusedBorder: InputBorder.none,
+                          contentPadding: EdgeInsets.symmetric(vertical: 11),
                         ),
                         onTap: () {
                           if (_showAttachments) {
@@ -465,8 +469,8 @@ class _ChatInputBarState extends State<ChatInputBar> {
                       borderRadius: BorderRadius.circular(24),
                       onTap: widget.isGenerating ? widget.onStop : _handleSend,
                       child: Container(
-                        width: 48,
-                        height: 48,
+                        width: 44,
+                        height: 44,
                         decoration: const BoxDecoration(
                           gradient: AppTheme.primaryGradient,
                           shape: BoxShape.circle,
@@ -483,7 +487,7 @@ class _ChatInputBarState extends State<ChatInputBar> {
                               ? Icons.stop_rounded
                               : Icons.arrow_upward_rounded,
                           color: Colors.white,
-                          size: 27,
+                          size: 24,
                         ),
                       ),
                     ),
@@ -517,11 +521,11 @@ class _AttachmentMenu extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: 286,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+      width: (MediaQuery.sizeOf(context).width - 36).clamp(240.0, 286.0).toDouble(),
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 5),
       decoration: BoxDecoration(
         color: AppTheme.surface,
-        borderRadius: BorderRadius.circular(22),
+        borderRadius: BorderRadius.circular(20),
         border: Border.all(color: AppTheme.border),
         boxShadow: const [
           BoxShadow(
@@ -594,16 +598,16 @@ class _AttachmentTile extends StatelessWidget {
           borderRadius: BorderRadius.circular(12),
           onTap: onTap,
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 9),
+            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 8),
             child: Row(
               children: [
-                Icon(icon, color: color, size: 25),
-                const SizedBox(width: 14),
+                Icon(icon, color: color, size: 23),
+                const SizedBox(width: 12),
                 Text(
                   label,
                   style: const TextStyle(
                     color: AppTheme.textPrimary,
-                    fontSize: 14.5,
+                    fontSize: 13.2,
                     fontWeight: FontWeight.w700,
                   ),
                 ),
@@ -636,11 +640,11 @@ class _RecordingPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      height: 62,
+      height: 56,
       padding: const EdgeInsets.symmetric(horizontal: 7),
       decoration: BoxDecoration(
         color: AppTheme.surface,
-        borderRadius: BorderRadius.circular(30),
+        borderRadius: BorderRadius.circular(28),
         border: Border.all(color: AppTheme.border),
         boxShadow: AppTheme.softShadow,
       ),
@@ -653,11 +657,11 @@ class _RecordingPanel extends StatelessWidget {
           ),
           Expanded(
             child: Container(
-              height: 46,
+              height: 42,
               padding: const EdgeInsets.symmetric(horizontal: 12),
               decoration: BoxDecoration(
                 color: AppTheme.lavender,
-                borderRadius: BorderRadius.circular(23),
+                borderRadius: BorderRadius.circular(21),
               ),
               child: Row(
                 children: [

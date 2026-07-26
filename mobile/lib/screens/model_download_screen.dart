@@ -59,16 +59,9 @@ class _ModelDownloadScreenState extends State<ModelDownloadScreen>
       final alreadyInstalled = await _gemma.isModelAlreadyDownloaded();
 
       if (alreadyInstalled) {
-        try {
-          _openingChat = true;
-          await _loadModelAndOpenChat();
-          return;
-        } catch (_) {
-          // Un ancien téléchargement incomplet peut avoir laissé un fichier
-          // portant le bon nom. Si le chargement échoue, on récupère ce fichier
-          // comme .part et on poursuit le téléchargement sans revenir à zéro.
-          _openingChat = false;
-        }
+        _openingChat = true;
+        _openChatImmediately();
+        return;
       }
 
       final initial = await _gemma.startBackgroundDownload();
@@ -151,23 +144,15 @@ class _ModelDownloadScreenState extends State<ModelDownloadScreen>
       );
 
       await _gemma.installDownloadedModel(filePath);
-      await _showStage(
-        'Modèle installé. Initialisation de l’IA hors ligne...',
-      );
-      await _loadModelAndOpenChat();
+      await _showStage('Modèle installé. Ouverture de Mpanabe AI…');
+      _openChatImmediately();
     } catch (error) {
       _openingChat = false;
       _showError('Installation impossible : $error');
     }
   }
 
-  Future<void> _loadModelAndOpenChat() async {
-    await _showStage(
-      'Chargement du modèle en mémoire… Cela peut prendre 1 à 5 minutes.',
-    );
-
-    await _gemma.createSession();
-
+  void _openChatImmediately() {
     if (!mounted) return;
     Navigator.of(context).pushReplacement(
       MaterialPageRoute<void>(builder: (_) => const ChatScreen()),

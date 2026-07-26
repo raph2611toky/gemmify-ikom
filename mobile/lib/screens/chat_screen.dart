@@ -1,16 +1,27 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
+import '../models/ai_tutor_response.dart';
 import '../models/audio_language_mode.dart';
 import '../models/chat_message.dart';
 import '../services/gemma_service.dart';
+import '../services/local_auth_service.dart';
 import '../services/local_learning_database.dart';
 import '../services/voice_interaction_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/chat_input_bar.dart';
 import '../widgets/message_bubble.dart';
+import 'auth/welcome_screen.dart';
+
+enum _LessonSetupStage {
+  idle,
+  choosingTopic,
+  awaitingCustomTopic,
+  choosingActivity,
+}
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key});
@@ -20,429 +31,1973 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
+  final _scaffoldKey = GlobalKey<ScaffoldState>();
+  final _scrollController = ScrollController();
+  final _db = LocalLearningDatabase.instance;
   final _gemma = GemmaService();
   final _voice = VoiceInteractionService.instance;
-  final _learningDb = LocalLearningDatabase.instance;
-  final _messages = <ChatMessage>[];
-  final _scrollController = ScrollController();
-  final _scaffoldKey = GlobalKey<ScaffoldState>();
 
-  bool _isGenerating = false;
-  bool _historyLoaded = false;
-  bool _voiceConversationEnabled = false;
-  AudioLanguageMode _audioLanguageMode = AudioLanguageMode.mixed;
-  int _autoListenRequestId = 0;
-  int _msgCounter = 0;
+  final List<ChatMessage> _messages = [];
+  final List<StoredConversation> _conversations = [];
+
   int? _conversationId;
+  int _messageCounter = 1;
+  int _generationSerial = 0;
+  bool _initializing = true;
+  bool _isGuestMode = false;
+  bool _modelReady = false;
+  bool _isGenerating = false;
+  String _studentName = '';
+  String _generationLabel = 'Préparation de la réponse…';
+  String _drawerQuery = '';
+
+  LessonState _activeLesson = const LessonState();
+  _LessonSetupStage _setupStage = _LessonSetupStage.idle;
+  String _selectedTopic = '';
+  String _selectedSubject = '';
+  String? _presetActivity;
+  AudioLanguageMode _languageMode = AudioLanguageMode.mixed;
+
+  bool get _hasConversationContent => _messages.isNotEmpty;
+  bool get _answerCanBeEvaluated =>
+      _activeLesson.isActive && _activeLesson.awaitingAnswer;
 
   @override
   void initState() {
     super.initState();
-    unawaited(_initializeSameChat());
+    _bootstrap();
   }
 
-  Future<void> _initializeSameChat() async {
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _bootstrap() async {
     try {
-      await _voice.initialize();
-      final mode = await _learningDb.loadLanguageMode();
-      final conversationId =
-          await _learningDb.getOrCreateActiveConversation();
-      final stored = await _learningDb.loadChatMessages(
-        conversationId,
-        limit: 100,
-      );
+      await _db.runMaintenance();
+      _languageMode = await _db.loadLanguageMode();
+      _isGuestMode = await _db.isGuestMode();
+      final profile = await _db.loadLocalProfile();
+      _studentName = profile?['first_name']?.toString().trim() ?? '';
 
-      final restoredUi = stored.map(_toUiMessage).toList(growable: false);
-      final replay = stored.map(_toReplayItem).toList(growable: false);
+      final id = await _db.getOrCreateActiveConversation();
+      await _loadConversation(id, resetGemma: false);
 
+      // L'interface est déjà visible pendant que le moteur local se prépare.
+      unawaited(_prepareLocalServices());
+    } catch (error) {
       if (!mounted) return;
+      setState(() => _initializing = false);
+      _showSnack('Impossible d’initialiser le chatbot : $error');
+    }
+  }
+
+  Future<void> _prepareLocalServices() async {
+    try {
+      // Le TTS est initialisé seulement lorsque l'utilisateur appuie sur
+      // lecture. On évite ainsi de démarrer plusieurs services au lancement.
+      await _gemma.createSession();
+      if (!mounted) return;
+      setState(() => _modelReady = true);
+    } on ModelNotActiveException {
+      if (!mounted) return;
+      setState(() => _modelReady = false);
+      _openModelPreparation();
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _modelReady = false);
+      _showSnack('Le moteur IA sera relancé au premier message.');
+    }
+  }
+
+  Future<bool> _ensureModelReady() async {
+    if (_modelReady) return true;
+    if (!mounted) return false;
+
+    setState(() {
+      _isGenerating = true;
+      _generationLabel = 'Préparation de Mpanabe AI…';
+    });
+
+    try {
+      await _gemma.createSession();
+      if (!mounted) return false;
       setState(() {
-        _audioLanguageMode = mode;
-        _conversationId = conversationId;
-        _messages
-          ..clear()
-          ..addAll(restoredUi);
-        _msgCounter = stored.length + 1;
-        _historyLoaded = true;
+        _modelReady = true;
+        _isGenerating = false;
       });
-      _scrollToBottom();
-
-      await _gemma.restoreConversation(replay);
-      debugPrint(
-        '🧠 Même chat prêt : ${stored.length} messages affichés, '
-        '${_gemma.currentTokens} tokens actifs.',
-      );
-    } catch (error, stackTrace) {
-      debugPrint('Impossible de restaurer la discussion : $error');
-      debugPrintStack(stackTrace: stackTrace);
-      if (mounted) setState(() => _historyLoaded = true);
+      return true;
+    } on ModelNotActiveException {
+      if (!mounted) return false;
+      setState(() => _isGenerating = false);
+      _openModelPreparation();
+      return false;
+    } catch (error) {
+      if (!mounted) return false;
+      setState(() => _isGenerating = false);
+      _showSnack('Impossible de préparer le moteur IA : $error');
+      return false;
     }
   }
 
-  ChatMessage _toUiMessage(StoredChatMessage stored) {
-    return ChatMessage(
-      id: 'db-${stored.id}',
-      isUser: stored.isUser,
-      text: stored.text,
-      audioPlaceholder: stored.modality == 'audio',
-      audioDuration: stored.audioDurationMs == null
-          ? null
-          : Duration(milliseconds: stored.audioDurationMs!),
-      voiceLanguageMode: stored.languageMode,
-      status: MessageStatus.done,
-    );
-  }
-
-  ConversationReplayItem _toReplayItem(StoredChatMessage stored) {
-    if (!stored.isUser) {
-      return ConversationReplayItem(isUser: false, text: stored.text);
-    }
-
-    switch (stored.modality) {
-      case 'audio':
-        return const ConversationReplayItem(
-          isUser: true,
-          text:
-              'Dans ce tour précédent, l’utilisateur a envoyé un message '
-              'vocal. La réponse suivante de Gemma contient le contexte utile '
-              'à conserver pour la suite de la même discussion.',
-        );
-      case 'image':
-        return ConversationReplayItem(
-          isUser: true,
-          text:
-              '${stored.text}\nUne image accompagnait ce message dans la '
-              'discussion précédente. Conserve le contexte de la réponse '
-              'suivante sans inventer de nouveaux détails visuels.',
-        );
-      default:
-        return ConversationReplayItem(isUser: true, text: stored.text);
-    }
-  }
-
-  Future<void> _setLanguageMode(AudioLanguageMode mode) async {
-    if (_audioLanguageMode == mode) return;
-    setState(() => _audioLanguageMode = mode);
-    await _learningDb.saveLanguageMode(mode);
-  }
-
-  void _scrollToBottom() {
+  void _openModelPreparation() {
+    if (!mounted) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
+      if (!mounted) return;
+      Navigator.of(context).pushReplacementNamed('/model');
+    });
+  }
+
+  Future<void> _loadConversation(
+    int conversationId, {
+    bool resetGemma = true,
+  }) async {
+    if (resetGemma) await _gemma.activateConversation(conversationId);
+    await _db.setActiveConversation(conversationId);
+
+    final stored = await _db.loadMessages(conversationId);
+    final conversations = await _db.listConversations();
+    final restored = <ChatMessage>[];
+
+    for (final item in stored) {
+      AiTutorResponse? response;
+      if (!item.isUser && item.structuredJson?.trim().isNotEmpty == true) {
+        response = AiTutorResponse.parse(item.structuredJson!);
+      }
+      restored.add(
+        ChatMessage(
+          id: 'db-${item.id}',
+          isUser: item.isUser,
+          text: item.isUser
+              ? item.text
+              : response?.response.trim().isNotEmpty == true
+                  ? response!.response
+                  : normalizeTutorMarkdown(item.text),
+          tutorResponse: response,
+          audioPlaceholder: item.modality == 'audio',
+          audioDuration: item.audioDurationMs == null
+              ? null
+              : Duration(milliseconds: item.audioDurationMs!),
+          voiceLanguageMode: item.languageMode,
+          createdAt: DateTime.fromMillisecondsSinceEpoch(item.createdAt),
+          choicesEnabled: false,
+        ),
+      );
+    }
+
+    if (restored.isNotEmpty &&
+        !restored.last.isUser &&
+        restored.last.tutorResponse?.choices.isNotEmpty == true) {
+      restored.last.choicesEnabled = true;
+    }
+
+    LessonState lesson = const LessonState();
+    _LessonSetupStage stage = _LessonSetupStage.idle;
+    String topic = '';
+    String subject = '';
+    for (final message in restored.reversed) {
+      final response = message.tutorResponse;
+      if (response == null) continue;
+      if (lesson.courseId.isEmpty &&
+          (response.lesson.isActive || response.lesson.completed)) {
+        lesson = response.lesson;
+      }
+      if (stage == _LessonSetupStage.idle) {
+        switch (response.flow) {
+          case 'lesson_topic':
+            stage = _LessonSetupStage.choosingTopic;
+            break;
+          case 'custom_lesson_topic':
+            stage = _LessonSetupStage.awaitingCustomTopic;
+            break;
+          case 'lesson_activity':
+            stage = _LessonSetupStage.choosingActivity;
+            break;
+        }
+      }
+      if (topic.isEmpty && response.lesson.topic.isNotEmpty) {
+        topic = response.lesson.topic;
+      }
+      if (subject.isEmpty && response.lesson.subject.isNotEmpty) {
+        subject = response.lesson.subject;
+      }
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _conversationId = conversationId;
+      _messages
+        ..clear()
+        ..addAll(restored);
+      _conversations
+        ..clear()
+        ..addAll(conversations);
+      _messageCounter = stored.length + 1;
+      _activeLesson = lesson.completed ? const LessonState() : lesson;
+      _setupStage = stage;
+      _selectedTopic = topic;
+      _selectedSubject = subject;
+      _initializing = false;
+      _generationSerial++;
+      _isGenerating = false;
+    });
+    _closeDrawer();
+    _scrollToBottom(jump: true);
+  }
+
+  Future<int> _ensureConversationId() async {
+    final current = _conversationId;
+    if (current != null) return current;
+    final id = await _db.getOrCreateActiveConversation();
+    _conversationId = id;
+    return id;
+  }
+
+  Future<void> _refreshConversations() async {
+    final values = await _db.listConversations();
+    if (!mounted) return;
+    setState(() {
+      _conversations
+        ..clear()
+        ..addAll(values);
+    });
+  }
+
+  Future<void> _newConversation() async {
+    if (_isGenerating) await _stopGeneration();
+    final id = await _db.createConversation();
+    if (!mounted) return;
+    await _loadConversation(id);
+  }
+
+  Future<void> _switchConversation(int id) async {
+    if (id == _conversationId) {
+      _closeDrawer();
+      return;
+    }
+    if (_isGenerating) await _stopGeneration();
+    await _loadConversation(id);
+  }
+
+  Future<void> _renameConversation(StoredConversation conversation) async {
+    final controller = TextEditingController(text: conversation.title);
+    final value = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Renommer la discussion'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 80,
+          decoration: const InputDecoration(
+            hintText: 'Titre',
+            border: OutlineInputBorder(),
+          ),
+          onSubmitted: (text) => Navigator.pop(dialogContext, text),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Annuler'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, controller.text),
+            child: const Text('Enregistrer'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (value?.trim().isEmpty != false) return;
+    await _db.renameConversation(conversation.id, value!.trim());
+    await _refreshConversations();
+  }
+
+  Future<void> _deleteConversation(StoredConversation conversation) async {
+    final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: const Text('Supprimer cette discussion ?'),
+            content: Text('« ${conversation.title} » sera supprimée.'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, false),
+                child: const Text('Annuler'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, true),
+                child: const Text(
+                  'Supprimer',
+                  style: TextStyle(color: AppTheme.error),
+                ),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+    if (!confirmed) return;
+
+    await _db.deleteConversation(conversation.id);
+    if (conversation.id == _conversationId) {
+      final remaining = await _db.listConversations();
+      final id = remaining.isEmpty
+          ? await _db.createConversation()
+          : remaining.first.id;
+      await _loadConversation(id);
+    } else {
+      await _refreshConversations();
+    }
+  }
+
+  void _closeDrawer() {
+    if (_scaffoldKey.currentState?.isDrawerOpen ?? false) {
+      _scaffoldKey.currentState?.closeDrawer();
+    }
+  }
+
+  void _scrollToBottom({bool jump = false}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scrollController.hasClients) return;
+      final target = _scrollController.position.maxScrollExtent;
+      if (jump) {
+        _scrollController.jumpTo(target);
+      } else {
         _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 250),
-          curve: Curves.easeOut,
+          target,
+          duration: const Duration(milliseconds: 280),
+          curve: Curves.easeOutCubic,
         );
       }
     });
   }
 
-  Future<int> _activeConversationId() async {
-    final existing = _conversationId;
-    if (existing != null) return existing;
-    final created = await _learningDb.getOrCreateActiveConversation();
-    _conversationId = created;
-    return created;
-  }
+  Future<void> _startLessonSetup({String? presetActivity}) async {
+    if (_isGenerating) return;
+    _presetActivity = presetActivity;
+    _setupStage = _LessonSetupStage.choosingTopic;
+    _activeLesson = const LessonState();
 
-  Future<void> _persistExchange({
-    required ChatMessage user,
-    required ChatMessage assistant,
-    required String modality,
-  }) async {
-    if (assistant.text.trim().isEmpty) return;
-    final conversationId = await _activeConversationId();
-    await _learningDb.saveExchange(
-      conversationId: conversationId,
-      userText: user.text,
-      userModality: modality,
-      audioDurationMs: user.audioDuration?.inMilliseconds,
-      languageMode: user.voiceLanguageMode,
-      assistantText: assistant.text.trim(),
+    final response = AiTutorResponse.local(
+      response:
+          'Quelle leçon veux-tu travailler ? Choisis un thème ou écris le tien avec « Autre ».',
+      flow: 'lesson_topic',
+      choices: const [
+        TutorChoice(
+          id: 'topic_fractions',
+          label: 'Fractions',
+          message: 'Je veux apprendre les fractions.',
+        ),
+        TutorChoice(
+          id: 'topic_multiplication',
+          label: 'Multiplication',
+          message: 'Je veux apprendre la multiplication.',
+        ),
+        TutorChoice(
+          id: 'topic_conjugaison',
+          label: 'Conjugaison',
+          message: 'Je veux apprendre la conjugaison.',
+        ),
+        TutorChoice(
+          id: 'topic_sciences',
+          label: 'Sciences',
+          message: 'Je veux apprendre une leçon de sciences.',
+        ),
+        TutorChoice(
+          id: 'topic_other',
+          label: 'Autre',
+          message: 'Je veux choisir une autre leçon.',
+        ),
+      ],
     );
-    debugPrint('💾 Échange enregistré dans la même discussion SQLite.');
+    await _appendLocalTurn(
+      userText: presetActivity == null
+          ? 'Apprendre une leçon'
+          : _activityLabel(presetActivity),
+      response: response,
+    );
   }
 
-  Future<void> _handleSend(
+  AiTutorResponse _buildGameMenuResponse({String? intro}) {
+    final lesson = _activeLesson.copyWith(
+      step: 3,
+      totalSteps: 3,
+      stage: 'Jeu et quiz',
+      awaitingAnswer: false,
+      completed: false,
+      gameQuestion: 0,
+      gameTotal: 2,
+      gameCorrect: 0,
+    );
+    return AiTutorResponse.local(
+      response: [
+        if (intro?.trim().isNotEmpty == true) intro!.trim(),
+        '## 🎮 Choisis ton jeu éducatif',
+        'Cette dernière étape permet de vérifier ce que tu as compris en jouant.',
+      ].join('\n\n'),
+      flow: 'game_menu',
+      action: 'wait_answer',
+      lesson: lesson,
+      choices: const [
+        TutorChoice(
+          id: 'game_quiz',
+          label: 'Quiz rapide',
+          message: 'Lance un mini quiz de 2 questions, une question à la fois.',
+        ),
+        TutorChoice(
+          id: 'game_memory',
+          label: 'Mémoire',
+          message: 'Lance un mini jeu de mémoire en 2 défis, un défi à la fois.',
+        ),
+        TutorChoice(
+          id: 'game_chrono',
+          label: 'Défi chrono',
+          message: 'Lance un défi chrono de 2 questions, une question à la fois.',
+        ),
+        TutorChoice(
+          id: 'game_true_false',
+          label: 'Vrai ou faux',
+          message: 'Lance un vrai ou faux de 2 affirmations, une à la fois.',
+        ),
+      ],
+    );
+  }
+
+  Future<void> _startSelectedLesson({
+    required String activity,
+    required String visibleUserText,
+  }) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final courseId = '${_slug(_selectedTopic)}_$now';
+    final normalizedActivity = activity == 'explanation' ? 'lesson' : activity;
+    final step = switch (normalizedActivity) {
+      'exercise' => 2,
+      'quiz' || 'game' || 'memory' || 'chrono' || 'true_false' => 3,
+      _ => 1,
+    };
+    final lesson = LessonState(
+      courseId: courseId,
+      subject: _selectedSubject,
+      topic: _selectedTopic,
+      activity: normalizedActivity,
+      stage: _stageForStep(step),
+      step: step,
+      totalSteps: 3,
+      awaitingAnswer: false,
+      gameQuestion: step == 3 && normalizedActivity != 'game' ? 1 : 0,
+      gameTotal: 2,
+      gameCorrect: 0,
+    );
+    setState(() {
+      _activeLesson = lesson;
+      _setupStage = _LessonSetupStage.idle;
+      _presetActivity = null;
+    });
+
+    if (normalizedActivity == 'game') {
+      await _appendLocalTurn(
+        userText: visibleUserText,
+        response: _buildGameMenuResponse(),
+      );
+      return;
+    }
+
+    final instruction = switch (step) {
+      2 =>
+        'Commence directement un exercice sur « $_selectedTopic ». Propose un seul exercice guidé, clair, avec 3 ou 4 choix. Le titre affiché doit être simplement « Exercice ».',
+      3 =>
+        'Commence « Jeu et quiz » sur « $_selectedTopic » avec le mode $normalizedActivity. Le jeu contient exactement 2 questions. Donne la question 1 sur 2 avec 2 ou 3 choix, sans numéro d’étape.',
+      _ =>
+        'Commence une explication sur « $_selectedTopic ». Explique pédagogiquement en markdown avec un exemple concret, puis pose une seule petite question avec 3 ou 4 choix si cela convient. Le titre affiché doit être simplement « Explication ».',
+    };
+
+    await _generateTurn(
+      visibleUserText: visibleUserText,
+      modelText: instruction,
+      activeLessonOverride: lesson,
+    );
+  }
+
+  Future<void> _advanceToExercise(String visibleUserText) async {
+    if (!_activeLesson.isActive || _activeLesson.step > 1) return;
+    final lesson = _activeLesson.copyWith(
+      step: 2,
+      totalSteps: 3,
+      stage: 'Exercice',
+      activity: 'exercise',
+      awaitingAnswer: false,
+      completed: false,
+    );
+    setState(() => _activeLesson = lesson);
+    await _generateTurn(
+      visibleUserText: visibleUserText,
+      modelText:
+          'Passe directement à un exercice guidé sur « ${lesson.topic} » avec 2 ou 3 choix. Ne demande pas si l’élève a compris et n’écris aucun numéro d’étape.',
+      activeLessonOverride: lesson,
+    );
+  }
+
+  Future<void> _requestHintWithoutEvaluation({
+    required String visibleUserText,
+    required String instruction,
+  }) async {
+    if (!_activeLesson.isActive) return;
+    final lesson = _activeLesson.copyWith(awaitingAnswer: false);
+    setState(() => _activeLesson = lesson);
+    await _generateTurn(
+      visibleUserText: visibleUserText,
+      modelText: instruction,
+      activeLessonOverride: lesson,
+    );
+  }
+
+  Future<void> _handleChoice(ChatMessage source, TutorChoice choice) async {
+    if (_isGenerating || !source.choicesEnabled) return;
+    setState(() {
+      source.choicesEnabled = false;
+      source.selectedChoiceId = choice.id;
+    });
+
+    // « J’ai compris » ne doit jamais être envoyé à Gemma comme une réponse
+    // évaluée. Il fait avancer localement l’explication vers l’exercice.
+    if ((choice.id == 'continue_to_exercise' || choice.id == 'understood') &&
+        _activeLesson.isActive &&
+        _activeLesson.step <= 1) {
+      await _advanceToExercise(choice.label);
+      return;
+    }
+
+    if (choice.id == 'exercise_hint' &&
+        _activeLesson.isActive &&
+        _activeLesson.step == 2) {
+      await _requestHintWithoutEvaluation(
+        visibleUserText: choice.label,
+        instruction:
+            'Donne un indice très court pour le même exercice, puis répète exactement la question avec 2 ou 3 choix. N’évalue rien.',
+      );
+      return;
+    }
+
+    if (choice.id == 'game_hint' &&
+        _activeLesson.isActive &&
+        _activeLesson.step == 3) {
+      await _requestHintWithoutEvaluation(
+        visibleUserText: choice.label,
+        instruction:
+            'Donne un indice très court pour la même manche, puis répète la même question avec ses choix. N’évalue rien et ne change pas le numéro de question.',
+      );
+      return;
+    }
+
+    if (source.tutorResponse?.flow == 'lesson_topic') {
+      if (choice.id == 'topic_other') {
+        _setupStage = _LessonSetupStage.awaitingCustomTopic;
+        await _appendLocalTurn(
+          userText: choice.label,
+          response: AiTutorResponse.local(
+            response:
+                'Écris le nom exact de la leçon ou du chapitre que tu veux apprendre.',
+            flow: 'custom_lesson_topic',
+          ),
+        );
+        return;
+      }
+      final data = _topicFromChoice(choice.id);
+      _selectedSubject = data.$1;
+      _selectedTopic = data.$2;
+      final preset = _presetActivity;
+      await _startSelectedLesson(
+        activity: preset ?? 'lesson',
+        visibleUserText: choice.label,
+      );
+      return;
+    }
+
+    if (source.tutorResponse?.flow == 'lesson_activity') {
+      final requested = choice.id.replaceFirst('activity_', '');
+      await _startSelectedLesson(
+        activity: requested == 'explanation' ? 'lesson' : requested,
+        visibleUserText: choice.label,
+      );
+      return;
+    }
+
+    if (source.tutorResponse?.flow == 'game_menu') {
+      final gameType = choice.id.replaceFirst('game_', '');
+      final lesson = _activeLesson.copyWith(
+        step: 3,
+        totalSteps: 3,
+        stage: 'Jeu et quiz',
+        activity: gameType,
+        awaitingAnswer: false,
+        completed: false,
+        gameQuestion: 1,
+        gameTotal: 2,
+        gameCorrect: 0,
+      );
+      setState(() => _activeLesson = lesson);
+      await _generateTurn(
+        visibleUserText: choice.label,
+        modelText: choice.message,
+        activeLessonOverride: lesson,
+      );
+      return;
+    }
+
+    if (source.tutorResponse?.flow == 'exercise_start') {
+      final lesson = _activeLesson.copyWith(
+        step: 2,
+        totalSteps: 3,
+        stage: 'Exercice',
+        awaitingAnswer: false,
+      );
+      setState(() => _activeLesson = lesson);
+      await _generateTurn(
+        visibleUserText: choice.label,
+        modelText:
+            'Commence maintenant un exercice guidé avec 2 ou 3 choix. N’écris aucun numéro d’étape.',
+        activeLessonOverride: lesson,
+      );
+      return;
+    }
+
+    if (source.tutorResponse?.flow == 'lesson_complete') {
+      switch (choice.id) {
+        case 'complete_progress':
+          await _showProgress();
+          return;
+        case 'complete_new_lesson':
+          await _startLessonSetup();
+          return;
+        case 'complete_replay':
+          await _startSelectedLesson(
+            activity: 'game',
+            visibleUserText: 'Rejouer',
+          );
+          return;
+      }
+    }
+
+    await _generateTurn(
+      visibleUserText: choice.label,
+      modelText: choice.message,
+    );
+  }
+
+  Future<void> _handleInputSend(
     String text,
     Uint8List? imageBytes,
     Uint8List? audioBytes,
     Duration? audioDuration,
   ) async {
     if (_isGenerating) return;
-    await _voice.stop();
+    final clean = text.trim();
 
-    if (audioBytes != null && audioBytes.isNotEmpty) {
-      await _handleAudioMessage(
-        audioBytes: audioBytes,
-        audioDuration: audioDuration ?? Duration.zero,
+    if (_setupStage == _LessonSetupStage.awaitingCustomTopic &&
+        clean.isNotEmpty &&
+        imageBytes == null &&
+        audioBytes == null) {
+      _selectedTopic = clean;
+      _selectedSubject = _subjectFromTopicText(clean);
+      final preset = _presetActivity;
+      await _startSelectedLesson(
+        activity: preset ?? 'lesson',
+        visibleUserText: clean,
       );
       return;
     }
 
-    await _handleRegularMessage(text: text, imageBytes: imageBytes);
-  }
-
-  Future<void> _handleRegularMessage({
-    required String text,
-    Uint8List? imageBytes,
-  }) async {
-    final userText = text.trim().isEmpty
-        ? 'Analyse cette image, corrige et explique.'
-        : text.trim();
-
-    final userMsg = ChatMessage(
-      id: '${_msgCounter++}',
-      isUser: true,
-      text: userText,
-      imageBytes: imageBytes,
-      voiceLanguageMode: _audioLanguageMode,
-    );
-
-    final botMsg = ChatMessage(
-      id: '${_msgCounter++}',
-      isUser: false,
-      voiceLanguageMode: _audioLanguageMode,
-      status: MessageStatus.streaming,
-    );
-
-    setState(() {
-      _messages.add(userMsg);
-      _messages.add(botMsg);
-      _isGenerating = true;
-    });
-    _scrollToBottom();
-
-    try {
-      await for (final token in _gemma.sendMessageStream(
-        text: userMsg.text,
-        imageBytes: imageBytes,
-      )) {
-        if (!mounted) return;
-        setState(() => botMsg.text += token);
-        _scrollToBottom();
-      }
-
-      if (!mounted) return;
-      setState(() {
-        botMsg.status = MessageStatus.done;
-        _isGenerating = false;
-      });
-
-      await _persistExchange(
-        user: userMsg,
-        assistant: botMsg,
-        modality: imageBytes == null ? 'text' : 'image',
-      );
-
-      if (_voiceConversationEnabled) {
-        await _voice.speak(
-          botMsg.text,
-          languageMode: _audioLanguageMode,
-        );
-        _scheduleAutoListen();
-      }
-    } catch (error) {
-      _markMessageError(botMsg, error);
-    } finally {
-      if (mounted) setState(() => _isGenerating = false);
+    if (imageBytes == null &&
+        audioBytes == null &&
+        _activeLesson.isActive &&
+        _activeLesson.step <= 1 &&
+        _isUnderstandingSignal(clean)) {
+      await _advanceToExercise(clean.isEmpty ? 'Passer à l’exercice' : clean);
+      return;
     }
-  }
 
-  Future<void> _handleAudioMessage({
-    required Uint8List audioBytes,
-    required Duration audioDuration,
-  }) async {
-    final languageMode = _audioLanguageMode;
-
-    final userMsg = ChatMessage(
-      id: '${_msgCounter++}',
-      isUser: true,
-      text: 'Message vocal',
+    await _generateTurn(
+      visibleUserText: clean.isEmpty
+          ? audioBytes != null
+              ? 'Message vocal'
+              : 'Image envoyée'
+          : clean,
+      modelText: clean,
+      imageBytes: imageBytes,
       audioBytes: audioBytes,
       audioDuration: audioDuration,
-      voiceLanguageMode: languageMode,
     );
+  }
 
-    final botMsg = ChatMessage(
-      id: '${_msgCounter++}',
-      isUser: false,
-      voiceLanguageMode: languageMode,
-      status: MessageStatus.streaming,
+  Future<void> _appendLocalTurn({
+    required String userText,
+    required AiTutorResponse response,
+  }) async {
+    final id = await _ensureConversationId();
+    for (final message in _messages) {
+      message.choicesEnabled = false;
+    }
+    final user = ChatMessage(
+      id: 'local-u-${_messageCounter++}',
+      isUser: true,
+      text: userText,
+      voiceLanguageMode: _languageMode,
     );
+    final assistant = ChatMessage(
+      id: 'local-a-${_messageCounter++}',
+      isUser: false,
+      text: response.response,
+      tutorResponse: response,
+      voiceLanguageMode: _languageMode,
+    );
+    if (!mounted) return;
+    setState(() {
+      _messages.add(user);
+      _messages.add(assistant);
+    });
+    await _db.saveExchange(
+      conversationId: id,
+      userText: userText,
+      userModality: 'text',
+      languageMode: _languageMode,
+      assistantResponse: response,
+    );
+    await _refreshConversations();
+    _scrollToBottom();
+  }
+
+  Future<void> _generateTurn({
+    required String visibleUserText,
+    required String modelText,
+    LessonState? activeLessonOverride,
+    Uint8List? imageBytes,
+    Uint8List? audioBytes,
+    Duration? audioDuration,
+  }) async {
+    if (_isGenerating) return;
+    if (!await _ensureModelReady()) return;
+    final conversationId = await _ensureConversationId();
+    final lessonAtStart = activeLessonOverride ?? _activeLesson;
+    final canEvaluate = lessonAtStart.isActive && lessonAtStart.awaitingAnswer;
+
+    for (final message in _messages) {
+      message.choicesEnabled = false;
+    }
+
+    final user = ChatMessage(
+      id: 'u-${_messageCounter++}',
+      isUser: true,
+      text: visibleUserText,
+      imageBytes: imageBytes,
+      audioBytes: audioBytes,
+      audioPlaceholder: audioBytes != null,
+      audioDuration: audioDuration,
+      voiceLanguageMode: _languageMode,
+    );
+    final placeholder = ChatMessage(
+      id: 'a-${_messageCounter++}',
+      isUser: false,
+      text: '',
+      tutorResponse: const AiTutorResponse(response: ''),
+      status: MessageStatus.streaming,
+      voiceLanguageMode: _languageMode,
+      choicesEnabled: false,
+    );
+    final localSerial = ++_generationSerial;
 
     setState(() {
-      _messages.add(userMsg);
-      _messages.add(botMsg);
+      _messages.add(user);
+      _messages.add(placeholder);
       _isGenerating = true;
+      _generationLabel = lessonAtStart.isActive
+          ? 'Préparation de la leçon…'
+          : imageBytes != null
+              ? 'Analyse de l’image…'
+              : audioBytes != null
+                  ? 'Écoute du message…'
+                  : 'Préparation de la réponse…';
     });
     _scrollToBottom();
 
     try {
-      await for (final token in _gemma.sendAudioMessageStream(
-        audioBytes: audioBytes,
-        languageMode: languageMode,
-      )) {
-        if (!mounted) return;
-        setState(() => botMsg.text += token);
-        _scrollToBottom();
+      AiTutorResponse response;
+      try {
+        response = await _gemma
+            .sendTutorMessage(
+              conversationId: conversationId,
+              text: modelText,
+              activeLesson: lessonAtStart,
+              answerCanBeEvaluated: canEvaluate,
+              imageBytes: imageBytes,
+              audioBytes: audioBytes,
+              languageMode: _languageMode,
+            )
+            .timeout(const Duration(seconds: 100));
+      } catch (error) {
+        if (!_isTokenError(error)) rethrow;
+        debugPrint('♻️ Saturation détectée, reconstruction de session puis essai unique');
+        await _gemma.resetConversationSession(conversationId: conversationId);
+        response = await _gemma
+            .sendTutorMessage(
+              conversationId: conversationId,
+              text: modelText,
+              activeLesson: lessonAtStart,
+              answerCanBeEvaluated: canEvaluate,
+              imageBytes: imageBytes,
+              audioBytes: audioBytes,
+              languageMode: _languageMode,
+            )
+            .timeout(const Duration(seconds: 100));
       }
 
-      if (!mounted) return;
+      if (!mounted || localSerial != _generationSerial) return;
+      response = _sanitizeLessonTransition(
+        response,
+        lessonAtStart,
+        canEvaluate: canEvaluate,
+      );
+
+      var progressResult = ProgressSaveResult.none;
+      if (canEvaluate) {
+        progressResult = await _db.saveProgressIfValid(
+          conversationId: conversationId,
+          lesson: response.lesson.courseId.isEmpty
+              ? lessonAtStart
+              : response.lesson,
+          progress: response.progress,
+        );
+      }
+
+      if (progressResult.pointsAdded > 0) {
+        response = response.copyWith(
+          response:
+              '${response.response}\n\n🏅 **+${progressResult.pointsAdded} point** — jeu terminé.',
+          progress: response.progress.copyWith(
+            xp: progressResult.pointsAdded,
+            understanding: progressResult.mastery,
+          ),
+        );
+      }
+
+      placeholder
+        ..text = response.response
+        ..tutorResponse = response
+        ..status = MessageStatus.done
+        ..choicesEnabled = response.choices.isNotEmpty;
+
+      if (response.lesson.isActive) {
+        _activeLesson = response.lesson;
+      } else if (response.lessonCompleted) {
+        _activeLesson = const LessonState();
+      }
+
       setState(() {
-        botMsg.status = MessageStatus.done;
         _isGenerating = false;
       });
 
-      await _persistExchange(
-        user: userMsg,
-        assistant: botMsg,
-        modality: 'audio',
+      await _db.saveExchange(
+        conversationId: conversationId,
+        userText: visibleUserText,
+        userModality: audioBytes != null
+            ? 'audio'
+            : imageBytes != null
+                ? 'image'
+                : 'text',
+        audioDurationMs: audioDuration?.inMilliseconds,
+        languageMode: _languageMode,
+        assistantResponse: response,
       );
-
-      await _voice.speak(
-        botMsg.text,
-        languageMode: languageMode,
-      );
-
-      if (_voiceConversationEnabled) {
-        _scheduleAutoListen();
-      }
+      await _refreshConversations();
+      _scrollToBottom();
+    } on GenerationCancelledException {
+      if (!mounted || localSerial != _generationSerial) return;
+      setState(() {
+        _isGenerating = false;
+        placeholder
+          ..text = 'Génération arrêtée.'
+          ..tutorResponse = AiTutorResponse.local(
+            response: 'Génération arrêtée.',
+            choices: const [
+              TutorChoice(
+                id: 'retry_after_stop',
+                label: 'Réessayer',
+                message: 'Reprends cette étape avec une réponse courte.',
+              ),
+            ],
+          )
+          ..status = MessageStatus.done
+          ..choicesEnabled = true;
+      });
+    } on TimeoutException {
+      await _gemma.stopGeneration();
+      if (!mounted || localSerial != _generationSerial) return;
+      setState(() {
+        _isGenerating = false;
+        placeholder
+          ..text = 'La réponse a pris trop de temps. La session a été nettoyée.'
+          ..tutorResponse = AiTutorResponse.local(
+            response:
+                'La réponse a pris trop de temps. La session a été nettoyée.',
+            choices: const [
+              TutorChoice(
+                id: 'retry_timeout',
+                label: 'Réessayer',
+                message: 'Reprends cette étape en moins de 100 mots.',
+              ),
+            ],
+          )
+          ..status = MessageStatus.done
+          ..choicesEnabled = true;
+      });
+      await _gemma.resetConversationSession(conversationId: conversationId);
     } catch (error) {
-      _markMessageError(botMsg, error);
-      _scheduleAutoListen();
+      if (!mounted || localSerial != _generationSerial) return;
+      setState(() {
+        _isGenerating = false;
+        placeholder
+          ..text = 'Une erreur a empêché la réponse : $error'
+          ..tutorResponse = null
+          ..status = MessageStatus.error
+          ..choicesEnabled = false;
+      });
+      _showSnack('Erreur du chatbot : $error');
     } finally {
-      if (mounted) setState(() => _isGenerating = false);
+      if (mounted && localSerial == _generationSerial && _isGenerating) {
+        setState(() => _isGenerating = false);
+      }
     }
   }
 
-  void _markMessageError(ChatMessage message, Object error) {
-    debugPrint('Erreur Gemma : $error');
-    if (!mounted) return;
-    setState(() {
-      message.text =
-          'Je n’ai pas pu terminer cette réponse. Réessaie avec une question plus courte.';
-      message.status = MessageStatus.error;
-      _isGenerating = false;
-    });
+  AiTutorResponse _sanitizeLessonTransition(
+    AiTutorResponse response,
+    LessonState previous, {
+    required bool canEvaluate,
+  }) {
+    if (!previous.isActive) return response;
+    if (response.wasTruncated) {
+      return response.copyWith(
+        lesson: previous.copyWith(awaitingAnswer: false),
+      );
+    }
+
+    var step = previous.step.clamp(1, 3).toInt();
+    var gameQuestion = previous.gameQuestion;
+    final gameTotal = previous.gameTotal.clamp(1, 2).toInt();
+    var gameCorrect = previous.gameCorrect;
+    var completed = false;
+    var flow = response.flow;
+    var choices = response.choices;
+    var text = response.response;
+    var action = response.action;
+
+    final scoreBasedCorrect = response.progress.maxScore > 0
+        ? response.progress.score == response.progress.maxScore
+        : null;
+    final inferredCorrect = response.progress.correct ??
+        scoreBasedCorrect ??
+        (canEvaluate && (action == 'next_step' || action == 'finish')
+            ? true
+            : null);
+
+    if (step == 3) {
+      // Le jeu est piloté par Flutter : deux manches, aucun bouton
+      // « J’ai compris », et une présentation plus dynamique.
+      gameQuestion = gameQuestion <= 0 ? 1 : gameQuestion;
+
+      if (!canEvaluate) {
+        choices = _normalizedGameChoices(choices, previous.activity);
+        flow = 'game_round';
+        action = 'wait_answer';
+        text = _decorateGameRound(
+          text: text,
+          activity: previous.activity,
+          question: gameQuestion,
+        );
+      } else {
+        if (inferredCorrect == true) gameCorrect++;
+        if (gameQuestion >= gameTotal) {
+          completed = true;
+          flow = 'lesson_complete';
+          action = 'finish';
+          text = _decorateGameComplete(
+            text: text,
+            activity: previous.activity,
+            score: gameCorrect,
+            total: gameTotal,
+            lastCorrect: inferredCorrect,
+          );
+          choices = [
+            const TutorChoice(
+              id: 'complete_replay',
+              label: '🎮 Rejouer',
+              message: 'Je veux refaire un mini-jeu de 2 questions.',
+            ),
+            if (!_isGuestMode)
+              const TutorChoice(
+                id: 'complete_progress',
+                label: '📈 Voir ma progression',
+                message: 'Affiche ma progression.',
+              ),
+            const TutorChoice(
+              id: 'complete_new_lesson',
+              label: '📚 Nouvelle leçon',
+              message: 'Je veux commencer une nouvelle leçon.',
+            ),
+          ];
+        } else {
+          gameQuestion++;
+          choices = _normalizedGameChoices(choices, previous.activity);
+          flow = 'game_round';
+          action = 'wait_answer';
+          text = _decorateGameRound(
+            text: text,
+            activity: previous.activity,
+            question: gameQuestion,
+            previousCorrect: inferredCorrect,
+          );
+        }
+      }
+    } else {
+      final shouldAdvance = canEvaluate &&
+          (action == 'next_step' ||
+              action == 'finish' ||
+              (action == 'none' && inferredCorrect == true));
+
+      if (shouldAdvance && step < 3) {
+        step++;
+        if (step == 2) {
+          flow = 'exercise_start';
+          choices = const [
+            TutorChoice(
+              id: 'start_exercise',
+              label: 'Commencer l’exercice',
+              message: 'Commence maintenant un exercice guidé sur cette notion.',
+            ),
+          ];
+          action = 'wait_answer';
+        } else if (step == 3) {
+          final gameMenu = _buildGameMenuResponse(intro: text);
+          text = gameMenu.response;
+          choices = gameMenu.choices;
+          flow = 'game_menu';
+          action = 'wait_answer';
+          gameQuestion = 0;
+        }
+      }
+    }
+
+    final awaiting = !completed &&
+        flow != 'game_menu' &&
+        flow != 'exercise_start' &&
+        (action == 'wait_answer' || choices.isNotEmpty);
+    final lesson = previous.copyWith(
+      step: step,
+      totalSteps: 3,
+      stage: _stageForStep(step),
+      awaitingAnswer: awaiting,
+      completed: completed,
+      gameQuestion: gameQuestion,
+      gameTotal: gameTotal,
+      gameCorrect: gameCorrect,
+    );
+
+    var evaluatedProgress = response.progress;
+    if (canEvaluate && inferredCorrect != null) {
+      final evidence = response.response.length > 180
+          ? '${response.response.substring(0, 179).trimRight()}…'
+          : response.response;
+      evaluatedProgress = ProgressUpdate(
+        save: true,
+        skillId: evaluatedProgress.skillId.trim().isEmpty
+            ? '${_slug(previous.topic)}_step_${previous.step}'
+            : evaluatedProgress.skillId,
+        skillLabel: evaluatedProgress.skillLabel.trim().isEmpty
+            ? '${_stageForStep(previous.step)} — ${previous.topic}'
+            : evaluatedProgress.skillLabel,
+        evidence: evaluatedProgress.evidence.trim().isEmpty
+            ? evidence
+            : evaluatedProgress.evidence,
+        correct: inferredCorrect,
+        score: completed ? gameCorrect : (inferredCorrect ? 1 : 0),
+        maxScore: completed ? gameTotal : 1,
+        understanding: inferredCorrect
+            ? evaluatedProgress.understanding.clamp(0, 100).toInt()
+            : 0,
+        // Les points sont calculés par le stockage local uniquement si la
+        // maîtrise augmente réellement.
+        xp: 0,
+        lessonCompleted: completed,
+      );
+    } else {
+      evaluatedProgress = const ProgressUpdate();
+    }
+
+    return response.copyWith(
+      response: text,
+      choices: choices,
+      lesson: lesson,
+      progress: evaluatedProgress,
+      flow: flow,
+      action: completed ? 'finish' : action,
+    );
   }
 
-  void _scheduleAutoListen() {
-    if (!_voiceConversationEnabled || !mounted) return;
-    Future<void>.delayed(const Duration(milliseconds: 450), () {
-      if (mounted && _voiceConversationEnabled && !_isGenerating) {
-        setState(() => _autoListenRequestId++);
+  Future<void> _stopGeneration() async {
+    if (!_isGenerating) return;
+    final serial = ++_generationSerial;
+    await _gemma.stopGeneration();
+    if (!mounted || serial != _generationSerial) return;
+    final streaming = _messages.where(
+      (message) => message.status == MessageStatus.streaming,
+    );
+    setState(() {
+      _isGenerating = false;
+      for (final message in streaming) {
+        message
+          ..text = 'Génération arrêtée.'
+          ..tutorResponse = AiTutorResponse.local(
+            response: 'Génération arrêtée.',
+            choices: const [
+              TutorChoice(
+                id: 'retry_stop',
+                label: 'Réessayer',
+                message: 'Reprends la dernière étape avec une réponse courte.',
+              ),
+            ],
+          )
+          ..status = MessageStatus.done
+          ..choicesEnabled = true;
       }
     });
   }
 
-  Future<void> _handleStop() async {
-    await _gemma.stopGeneration();
-    await _voice.stop();
-    if (mounted) setState(() => _isGenerating = false);
-  }
-
-  Future<void> _toggleVoiceConversation() async {
-    final next = !_voiceConversationEnabled;
-    await _voice.stop();
-
-    setState(() {
-      _voiceConversationEnabled = next;
-      if (next && !_isGenerating) _autoListenRequestId++;
-    });
-
+  Future<void> _showProgress() async {
+    if (_isGuestMode) {
+      _showSnack('La progression est désactivée en mode invité.');
+      return;
+    }
+    final overview = await _db.getLearningOverview();
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        duration: const Duration(seconds: 2),
-        content: Text(
-          next
-              ? 'Conversation vocale directe activée : Gemma écoute, répond '
-                  'à voix haute puis réactive le microphone.'
-              : 'Conversation vocale désactivée.',
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.72,
+        minChildSize: 0.45,
+        maxChildSize: 0.92,
+        expand: false,
+        builder: (context, controller) => Material(
+          color: Colors.white,
+          borderRadius: const BorderRadius.vertical(
+            top: Radius.circular(28),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 14, 20, 20),
+            child: ListView(
+              controller: controller,
+              children: [
+              Center(
+                child: Container(
+                  width: 42,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: AppTheme.border,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 18),
+              const Text(
+                'Ta progression',
+                style: TextStyle(fontSize: 23, fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  Expanded(
+                    child: _ProgressMetric(
+                      icon: Icons.stars_rounded,
+                      label: 'Niveau',
+                      value: overview.levelLabel,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _ProgressMetric(
+                      icon: Icons.bolt_rounded,
+                      label: 'XP',
+                      value: '${overview.totalXp}',
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _ProgressMetric(
+                      icon: Icons.school_rounded,
+                      label: 'Cours finis',
+                      value: '${overview.completedLessons}',
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              LinearProgressIndicator(
+                value: overview.nextLevelXp <= 0
+                    ? 0
+                    : (overview.totalXp / overview.nextLevelXp).clamp(0, 1),
+                minHeight: 9,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              const SizedBox(height: 22),
+              const Text(
+                'Compétences',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(height: 6),
+              if (overview.skills.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 30),
+                  child: Text(
+                    'Termine un exercice ou un quiz pour commencer à enregistrer ta progression.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: AppTheme.textSecondary),
+                  ),
+                )
+              else
+                ...overview.skills.map(
+                  (skill) => ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: CircleAvatar(
+                      backgroundColor: AppTheme.lavender,
+                      child: Text('${skill.mastery}%'),
+                    ),
+                    title: Text(
+                      skill.skillLabel,
+                      style: const TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    subtitle: Text(
+                      '${skill.subject} · ${skill.topic}\n'
+                      '${skill.correctAnswers}/${skill.attempts} bonne(s) réponse(s) · ${skill.xp} points',
+                    ),
+                    trailing: SizedBox(
+                      width: 75,
+                      child: LinearProgressIndicator(
+                        value: skill.mastery / 100,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
   }
 
-  @override
-  void dispose() {
-    _voice.stop();
-    _scrollController.dispose();
-    super.dispose();
+  Future<void> _setLanguageMode(AudioLanguageMode mode) async {
+    setState(() => _languageMode = mode);
+    await _db.saveLanguageMode(mode);
+  }
+
+  void _showSnack(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       key: _scaffoldKey,
-      backgroundColor: AppTheme.background,
-      drawer: _MpanabeDrawer(
-        languageMode: _audioLanguageMode,
-        voiceConversationEnabled: _voiceConversationEnabled,
-        onLanguageChanged: _setLanguageMode,
-        onVoiceChanged: _toggleVoiceConversation,
-      ),
+      drawer: _buildDrawer(),
       body: SafeArea(
-        bottom: false,
-        child: Column(
-          children: [
-            Expanded(
-              child: !_historyLoaded
-                  ? const Center(child: CircularProgressIndicator())
-                  : ListView(
-                      controller: _scrollController,
-                      padding: const EdgeInsets.fromLTRB(18, 8, 18, 24),
-                      children: [
-                        _MpanabeHeader(
-                          onMenuTap: () =>
-                              _scaffoldKey.currentState?.openDrawer(),
-                        ),
-                        const SizedBox(height: 22),
-                        _MissionCard(
-                          onStart: () => _handleSend(
-                            'Apprends-moi à additionner les fractions, étape par étape.',
-                            null,
-                            null,
-                            null,
+        child: _initializing
+            ? const Center(child: CircularProgressIndicator())
+            : Column(
+                children: [
+                  _buildHeader(),
+                  Expanded(
+                    child: _hasConversationContent
+                        ? _buildConversation()
+                        : _buildHome(),
+                  ),
+                  if (_hasConversationContent) _buildPersistentMenu(),
+                  if (_isGenerating)
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(22, 2, 22, 2),
+                      child: Row(
+                        children: [
+                          const SizedBox(
+                            width: 15,
+                            height: 15,
+                            child: CircularProgressIndicator(strokeWidth: 2),
                           ),
-                        ),
-                        const SizedBox(height: 24),
-                        const _GreetingSection(),
-                        const SizedBox(height: 22),
-                        _LearningFeatureGrid(
-                          onSelected: (prompt) =>
-                              _handleSend(prompt, null, null, null),
-                        ),
-                        const SizedBox(height: 28),
-                        const _TodayDivider(),
-                        const SizedBox(height: 12),
-                        if (_messages.isEmpty)
-                          _ConversationPreview(
-                            onQuickReply: (text) =>
-                                _handleSend(text, null, null, null),
-                          )
-                        else ...[
-                          ..._messages.map(
-                            (message) => MessageBubble(message: message),
-                          ),
-                          const SizedBox(height: 8),
-                          _QuickReplies(
-                            onSelected: (text) =>
-                                _handleSend(text, null, null, null),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              _generationLabel,
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: AppTheme.textSecondary,
+                              ),
+                            ),
                           ),
                         ],
-                      ],
+                      ),
+                    ),
+                  ChatInputBar(
+                    onSend: _handleInputSend,
+                    isGenerating: _isGenerating,
+                    onStop: _stopGeneration,
+                    onRecordingStarted: _voice.stop,
+                    voiceConversationEnabled: false,
+                    autoListenRequestId: 0,
+                  ),
+                ],
+              ),
+      ),
+    );
+  }
+
+  Widget _buildHeader() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(15, 12, 16, 13),
+      child: Row(
+        children: [
+          IconButton(
+            onPressed: () => _scaffoldKey.currentState?.openDrawer(),
+            icon: const Icon(Icons.menu_rounded, size: 29),
+          ),
+          const SizedBox(width: 4),
+          Image.asset(
+            'assets/images/mascot.png',
+            width: 42,
+            height: 42,
+            errorBuilder: (_, __, ___) => const Icon(
+              Icons.smart_toy_rounded,
+              color: AppTheme.accent,
+              size: 35,
+            ),
+          ),
+          const SizedBox(width: 10),
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Mpanabe AI',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 21.5,
+                    fontWeight: FontWeight.w800,
+                    color: AppTheme.textPrimary,
+                  ),
+                ),
+                Text(
+                  'Ton compagnon d’apprentissage',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: AppTheme.textSecondary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (!_isGuestMode)
+            Tooltip(
+              message: 'Voir ma progression',
+              child: InkWell(
+                onTap: _showProgress,
+                borderRadius: BorderRadius.circular(16),
+                child: Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: AppTheme.softLavender,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: const Color(0xFFD8C9FF)),
+                  ),
+                  child: const Icon(
+                    Icons.trending_up_rounded,
+                    color: AppTheme.accent,
+                    size: 24,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHome() {
+    final greeting = _studentName.isEmpty
+        ? 'Bonjour 👋'
+        : 'Bonjour $_studentName 👋';
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final narrow = constraints.maxWidth < 390;
+        final horizontalPadding = narrow ? 14.0 : 18.0;
+        final missionHeight = narrow ? 168.0 : 174.0;
+
+        return SingleChildScrollView(
+          padding: EdgeInsets.fromLTRB(
+            horizontalPadding,
+            8,
+            horizontalPadding,
+            18,
+          ),
+          child: Column(
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(24),
+                child: Container(
+                  height: missionHeight,
+                  width: double.infinity,
+                  decoration: const BoxDecoration(
+                    gradient: AppTheme.missionGradient,
+                  ),
+                  child: LayoutBuilder(
+                    builder: (context, cardConstraints) {
+                      return Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          Positioned(
+                            right: narrow ? -8 : 0,
+                            bottom: -2,
+                            width: cardConstraints.maxWidth *
+                                (narrow ? 0.47 : 0.45),
+                            child: Image.asset(
+                              'assets/images/mission_teacher.png',
+                              fit: BoxFit.contain,
+                              alignment: Alignment.bottomRight,
+                              errorBuilder: (_, __, ___) => const SizedBox(),
+                            ),
+                          ),
+                          Positioned.fill(
+                            child: Padding(
+                              padding: EdgeInsets.fromLTRB(
+                                narrow ? 15 : 18,
+                                14,
+                                cardConstraints.maxWidth *
+                                    (narrow ? 0.40 : 0.42),
+                                13,
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Row(
+                                    children: [
+                                      CircleAvatar(
+                                        radius: 17,
+                                        backgroundColor: AppTheme.accent,
+                                        child: Icon(
+                                          Icons.gps_fixed_rounded,
+                                          color: Colors.white,
+                                          size: 19,
+                                        ),
+                                      ),
+                                      SizedBox(width: 9),
+                                      Expanded(
+                                        child: Text(
+                                          'Mission du jour',
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            color: AppTheme.accent,
+                                            fontWeight: FontWeight.w900,
+                                            fontSize: 14.5,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 10),
+                                  const Text(
+                                    'Aujourd’hui, apprends à additionner les fractions.',
+                                    maxLines: 3,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontSize: 13.8,
+                                      height: 1.2,
+                                      color: AppTheme.textPrimary,
+                                      fontWeight: FontWeight.w900,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  SizedBox(
+                                    height: 38,
+                                    child: DecoratedBox(
+                                      decoration: BoxDecoration(
+                                        gradient: AppTheme.primaryGradient,
+                                        borderRadius: BorderRadius.circular(14),
+                                      ),
+                                      child: FilledButton(
+                                        onPressed: _startLessonSetup,
+                                        style: FilledButton.styleFrom(
+                                          backgroundColor: Colors.transparent,
+                                          shadowColor: Colors.transparent,
+                                          foregroundColor: Colors.white,
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 15,
+                                          ),
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius:
+                                                BorderRadius.circular(14),
+                                          ),
+                                        ),
+                                        child: const Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Text(
+                                              'Commencer',
+                                              style: TextStyle(
+                                                fontWeight: FontWeight.w800,
+                                                fontSize: 13.5,
+                                              ),
+                                            ),
+                                            SizedBox(width: 7),
+                                            Icon(
+                                              Icons.arrow_forward_rounded,
+                                              size: 18,
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+              ),
+              SizedBox(height: narrow ? 21 : 25),
+              Text(
+                greeting,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 23,
+                  fontWeight: FontWeight.w900,
+                  color: AppTheme.textPrimary,
+                ),
+              ),
+              const SizedBox(height: 7),
+              const Text(
+                'Qu’allons-nous apprendre aujourd’hui ?',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 16.5,
+                  fontWeight: FontWeight.w800,
+                  color: AppTheme.textPrimary,
+                ),
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                'Je suis là pour t’aider à comprendre, pratiquer\net progresser à ton rythme.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: AppTheme.textSecondary,
+                  fontSize: 12.5,
+                  height: 1.38,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              SizedBox(height: narrow ? 18 : 22),
+              GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                itemCount: 6,
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 3,
+                  crossAxisSpacing: narrow ? 8 : 10,
+                  mainAxisSpacing: narrow ? 9 : 11,
+                  mainAxisExtent: narrow ? 86 : 92,
+                ),
+                itemBuilder: (context, index) {
+                  final actions = <(IconData, String, VoidCallback, Color)>[
+                    (
+                      Icons.menu_book_rounded,
+                      'Expliquer un cours',
+                      _startLessonSetup,
+                      const Color(0xFF8A55FF),
+                    ),
+                    (
+                      Icons.psychology_alt_rounded,
+                      'Aide pour un exercice',
+                      () => _startLessonSetup(presetActivity: 'exercise'),
+                      const Color(0xFFF0659B),
+                    ),
+                    (
+                      Icons.sports_esports_rounded,
+                      'Créer un jeu éducatif',
+                      () => _startLessonSetup(presetActivity: 'game'),
+                      const Color(0xFF12B76A),
+                    ),
+                    (
+                      Icons.camera_alt_rounded,
+                      'Analyser une copie',
+                      () => _showSnack(
+                        'Appuie sur + puis choisis une image.',
+                      ),
+                      const Color(0xFF4A8BFF),
+                    ),
+                    (
+                      Icons.translate_rounded,
+                      'Traduire en Malagasy',
+                      () => _appendLocalTurn(
+                        userText: 'Traduire en Malagasy',
+                        response: AiTutorResponse.local(
+                          response:
+                              'Écris le texte que tu veux traduire en malagasy.',
+                        ),
+                      ),
+                      const Color(0xFFFFB800),
+                    ),
+                    (
+                      Icons.quiz_rounded,
+                      'Générer un quiz',
+                      () => _startLessonSetup(presetActivity: 'quiz'),
+                      const Color(0xFF21C6AD),
+                    ),
+                  ];
+                  final action = actions[index];
+                  return _HomeAction(
+                    icon: action.$1,
+                    label: action.$2,
+                    onTap: action.$3,
+                    iconColor: action.$4,
+                  );
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildConversation() {
+    return ListView.builder(
+      controller: _scrollController,
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+      itemCount: _messages.length,
+      itemBuilder: (context, index) {
+        final message = _messages[index];
+        return MessageBubble(
+          message: message,
+          onChoiceSelected: (choice) => _handleChoice(message, choice),
+          onSpeak: message.isUser
+              ? null
+              : () => _voice.speak(
+                    message.tutorResponse?.response ?? message.text,
+                    languageMode: message.voiceLanguageMode,
+                  ),
+        );
+      },
+    );
+  }
+
+  Widget _buildPersistentMenu() {
+    final actions = <(IconData, String, VoidCallback)>[
+      (Icons.menu_book_rounded, 'Leçon', _startLessonSetup),
+      (
+        Icons.psychology_alt_rounded,
+        'Exercice',
+        () => _startLessonSetup(presetActivity: 'exercise'),
+      ),
+      (
+        Icons.quiz_rounded,
+        'Quiz',
+        () => _startLessonSetup(presetActivity: 'quiz'),
+      ),
+      (
+        Icons.sports_esports_rounded,
+        'Jeu',
+        () => _startLessonSetup(presetActivity: 'game'),
+      ),
+      if (!_isGuestMode)
+        (Icons.trending_up_rounded, 'Progression', _showProgress),
+      (
+        Icons.history_rounded,
+        'Discussions',
+        () => _scaffoldKey.currentState?.openDrawer(),
+      ),
+    ];
+    return SizedBox(
+      height: 48,
+      child: ListView.separated(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+        scrollDirection: Axis.horizontal,
+        itemCount: actions.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 7),
+        itemBuilder: (context, index) {
+          final action = actions[index];
+          return ActionChip(
+            avatar: Icon(action.$1, size: 17, color: AppTheme.accent),
+            label: Text(action.$2),
+            onPressed: _isGenerating ? null : action.$3,
+            backgroundColor: Colors.white,
+            side: const BorderSide(color: Color(0xFFDCCFFF)),
+            labelStyle: const TextStyle(
+              color: AppTheme.accent,
+              fontWeight: FontWeight.w700,
+              fontSize: 12,
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Future<void> _logout() async {
+    if (_isGenerating) {
+      await _stopGeneration();
+    }
+    await LocalAuthService.instance.logout();
+    _db.clearRuntimeData();
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute<void>(builder: (_) => const WelcomeScreen()),
+      (_) => false,
+    );
+  }
+
+  Widget _buildDrawer() {
+    final filtered = _conversations.where((conversation) {
+      final query = _drawerQuery.trim().toLowerCase();
+      if (query.isEmpty) return true;
+      return conversation.title.toLowerCase().contains(query) ||
+          conversation.topic.toLowerCase().contains(query) ||
+          conversation.preview.toLowerCase().contains(query);
+    }).toList(growable: false);
+    final drawerItems = <Object>[];
+    String? lastGroup;
+    for (final conversation in filtered) {
+      final group = _conversationGroupLabel(conversation.updatedAt);
+      if (group != lastGroup) {
+        drawerItems.add(group);
+        lastGroup = group;
+      }
+      drawerItems.add(conversation);
+    }
+
+    return Drawer(
+      width: MediaQuery.sizeOf(context).width * 0.88,
+      backgroundColor: const Color(0xFFFAF9FE),
+      child: SafeArea(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(15, 12, 15, 8),
+              child: Row(
+                children: [
+                  const Expanded(
+                    child: Text(
+                      'Discussions',
+                      style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: _newConversation,
+                    tooltip: 'Nouvelle discussion',
+                    icon: const Icon(Icons.edit_square),
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 15),
+              child: TextField(
+                onChanged: (value) => setState(() => _drawerQuery = value),
+                decoration: InputDecoration(
+                  filled: true,
+                  fillColor: Colors.white,
+                  prefixIcon: const Icon(Icons.search_rounded),
+                  hintText: 'Rechercher',
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(16),
+                    borderSide: BorderSide.none,
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Expanded(
+              child: filtered.isEmpty
+                  ? const Center(
+                      child: Text(
+                        'Aucune discussion',
+                        style: TextStyle(color: AppTheme.textSecondary),
+                      ),
+                    )
+                  : ListView.builder(
+                      padding: const EdgeInsets.symmetric(horizontal: 9),
+                      itemCount: drawerItems.length,
+                      itemBuilder: (context, index) {
+                        final item = drawerItems[index];
+                        if (item is String) {
+                          return Padding(
+                            padding: const EdgeInsets.fromLTRB(12, 12, 12, 5),
+                            child: Text(
+                              item,
+                              style: const TextStyle(
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w800,
+                                color: AppTheme.textSecondary,
+                              ),
+                            ),
+                          );
+                        }
+                        final conversation = item as StoredConversation;
+                        final active = conversation.id == _conversationId;
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 3),
+                          child: Material(
+                            color: active
+                                ? AppTheme.lavender
+                                : Colors.transparent,
+                            borderRadius: BorderRadius.circular(13),
+                            clipBehavior: Clip.antiAlias,
+                            child: ListTile(
+                              onTap: () =>
+                                  _switchConversation(conversation.id),
+                              leading: const Icon(
+                                Icons.chat_bubble_outline_rounded,
+                              ),
+                            title: Text(
+                              conversation.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontWeight: active
+                                    ? FontWeight.w800
+                                    : FontWeight.w600,
+                              ),
+                            ),
+                            subtitle: conversation.preview.trim().isEmpty
+                                ? null
+                                : Text(
+                                    conversation.preview,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                            trailing: PopupMenuButton<String>(
+                              onSelected: (value) {
+                                if (value == 'rename') {
+                                  _renameConversation(conversation);
+                                } else if (value == 'delete') {
+                                  _deleteConversation(conversation);
+                                }
+                              },
+                              itemBuilder: (_) => const [
+                                PopupMenuItem(
+                                  value: 'rename',
+                                  child: Text('Renommer'),
+                                ),
+                                PopupMenuItem(
+                                  value: 'delete',
+                                  child: Text('Supprimer'),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        );
+                      },
                     ),
             ),
-            ChatInputBar(
-              onSend: _handleSend,
-              isGenerating: _isGenerating,
-              onStop: _handleStop,
-              onRecordingStarted: _voice.stop,
-              voiceConversationEnabled: _voiceConversationEnabled,
-              autoListenRequestId: _autoListenRequestId,
+            if (_isGuestMode)
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 8, 16, 4),
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.visibility_off_outlined,
+                      size: 17,
+                      color: AppTheme.textSecondary,
+                    ),
+                    SizedBox(width: 7),
+                    Expanded(
+                      child: Text(
+                        'Mode invité · discussions temporaires · sans progression',
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          color: AppTheme.textSecondary,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            const Divider(height: 1),
+            if (!_isGuestMode)
+              ListTile(
+                leading: const Icon(
+                  Icons.trending_up_rounded,
+                  color: AppTheme.accent,
+                ),
+                title: const Text(
+                  'Ma progression',
+                  style: TextStyle(
+                    color: AppTheme.textPrimary,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  _showProgress();
+                },
+              ),
+            if (!_isGuestMode)
+              ListTile(
+                leading: const Icon(
+                  Icons.logout_rounded,
+                  color: AppTheme.error,
+                ),
+                title: const Text(
+                  'Se déconnecter',
+                  style: TextStyle(
+                    color: AppTheme.error,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                onTap: _logout,
+              ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 4, 14, 14),
+              child: DropdownButtonFormField<AudioLanguageMode>(
+                value: _languageMode,
+                decoration: const InputDecoration(
+                  labelText: 'Langue vocale',
+                  border: OutlineInputBorder(),
+                ),
+                items: AudioLanguageMode.values
+                    .map(
+                      (mode) => DropdownMenuItem(
+                        value: mode,
+                        child: Text(mode.label),
+                      ),
+                    )
+                    .toList(growable: false),
+                onChanged: (value) {
+                  if (value != null) _setLanguageMode(value);
+                },
+              ),
             ),
           ],
         ),
@@ -451,100 +2006,112 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 }
 
-class _MpanabeHeader extends StatelessWidget {
-  final VoidCallback onMenuTap;
+class _HomeAction extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  final Color iconColor;
 
-  const _MpanabeHeader({required this.onMenuTap});
+  const _HomeAction({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    required this.iconColor,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      height: 72,
-      child: Row(
-        children: [
-          InkWell(
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(18),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(18),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 9),
+          decoration: BoxDecoration(
+            color: Colors.white,
             borderRadius: BorderRadius.circular(18),
-            onTap: onMenuTap,
-            child: const Padding(
-              padding: EdgeInsets.all(8),
-              child: Icon(
-                Icons.menu_rounded,
-                size: 31,
-                color: AppTheme.textPrimary,
+            border: Border.all(color: const Color(0xFFF0ECF8)),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x0D0B1038),
+                blurRadius: 14,
+                offset: Offset(0, 5),
               ),
-            ),
+            ],
           ),
-          const SizedBox(width: 10),
-          SizedBox(
-            width: 48,
-            height: 48,
-            child: Image.asset(
-              'assets/images/mascot.png',
-              fit: BoxFit.contain,
-            ),
-          ),
-          const SizedBox(width: 8),
-          const Expanded(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Mpanabe AI',
-                  style: TextStyle(
-                    color: AppTheme.textPrimary,
-                    fontSize: 23,
-                    fontWeight: FontWeight.w900,
-                    letterSpacing: -0.5,
-                  ),
-                ),
-                SizedBox(height: 1),
-                Text(
-                  'Ton compagnon d’apprentissage',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: AppTheme.textSecondary,
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 8),
-          Stack(
-            clipBehavior: Clip.none,
+          child: Row(
             children: [
               Container(
-                width: 52,
-                height: 52,
+                width: 33,
+                height: 33,
                 decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: AppTheme.lavender,
-                  border: Border.all(color: const Color(0xFFE6DBFF), width: 2),
+                  color: iconColor.withOpacity(0.12),
+                  borderRadius: BorderRadius.circular(11),
                 ),
-                child: ClipOval(
-                  child: Image.asset(
-                    'assets/images/profile_avatar.png',
-                    fit: BoxFit.cover,
-                  ),
-                ),
+                child: Icon(icon, color: iconColor, size: 21),
               ),
-              Positioned(
-                right: -1,
-                bottom: 2,
-                child: Container(
-                  width: 15,
-                  height: 15,
-                  decoration: BoxDecoration(
-                    color: AppTheme.accent,
-                    shape: BoxShape.circle,
-                    border: Border.all(color: Colors.white, width: 3),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.left,
+                  style: const TextStyle(
+                    fontSize: 10.6,
+                    height: 1.16,
+                    color: AppTheme.textPrimary,
+                    fontWeight: FontWeight.w800,
                   ),
                 ),
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ProgressMetric extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String value;
+
+  const _ProgressMetric({
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppTheme.softLavender,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Column(
+        children: [
+          Icon(icon, color: AppTheme.accent),
+          const SizedBox(height: 5),
+          Text(
+            value,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontWeight: FontWeight.w800),
+          ),
+          Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 10.5,
+              color: AppTheme.textSecondary,
+            ),
           ),
         ],
       ),
@@ -552,530 +2119,215 @@ class _MpanabeHeader extends StatelessWidget {
   }
 }
 
-class _MissionCard extends StatelessWidget {
-  final VoidCallback onStart;
+String _conversationGroupLabel(int timestamp) {
+  final date = DateTime.fromMillisecondsSinceEpoch(timestamp);
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  final itemDay = DateTime(date.year, date.month, date.day);
+  final difference = today.difference(itemDay).inDays;
+  if (difference <= 0) return 'Aujourd’hui';
+  if (difference == 1) return 'Hier';
+  if (difference <= 7) return '7 derniers jours';
+  return 'Plus ancien';
+}
 
-  const _MissionCard({required this.onStart});
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        return Container(
-          height: 165,
-          clipBehavior: Clip.antiAlias,
-          decoration: BoxDecoration(
-            gradient: AppTheme.missionGradient,
-            borderRadius: BorderRadius.circular(24),
-            boxShadow: AppTheme.softShadow,
-          ),
-          child: Stack(
-            children: [
-              Positioned(
-                right: 0,
-                top: 0,
-                bottom: 0,
-                width: constraints.maxWidth * 0.56,
-                child: Image.asset(
-                  'assets/images/mission_teacher.png',
-                  fit: BoxFit.cover,
-                  alignment: Alignment.centerRight,
-                ),
-              ),
-              Positioned.fill(
-                child: DecoratedBox(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.centerLeft,
-                      end: Alignment.centerRight,
-                      stops: const [0, 0.54, 0.75],
-                      colors: [
-                        const Color(0xFFF7F3FF),
-                        const Color(0xFFF7F3FF).withOpacity(0.96),
-                        Colors.transparent,
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 17, 12, 14),
-                child: SizedBox(
-                  width: constraints.maxWidth * 0.56,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Row(
-                        children: [
-                          _GradientIconCircle(
-                            icon: Icons.track_changes_rounded,
-                          ),
-                          SizedBox(width: 10),
-                          Text(
-                            'Mission du jour',
-                            style: TextStyle(
-                              color: AppTheme.accentDark,
-                              fontSize: 15.5,
-                              fontWeight: FontWeight.w900,
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                      const Text(
-                        'Aujourd’hui, apprends à\nadditionner les fractions.',
-                        style: TextStyle(
-                          color: AppTheme.textPrimary,
-                          fontSize: 17,
-                          height: 1.28,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: -0.2,
-                        ),
-                      ),
-                      const Spacer(),
-                      InkWell(
-                        borderRadius: BorderRadius.circular(16),
-                        onTap: onStart,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 10,
-                          ),
-                          decoration: BoxDecoration(
-                            gradient: AppTheme.primaryGradient,
-                            borderRadius: BorderRadius.circular(16),
-                            boxShadow: const [
-                              BoxShadow(
-                                color: Color(0x345A22E8),
-                                blurRadius: 12,
-                                offset: Offset(0, 5),
-                              ),
-                            ],
-                          ),
-                          child: const Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(
-                                'Commencer',
-                                style: TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 13.5,
-                                  fontWeight: FontWeight.w800,
-                                ),
-                              ),
-                              SizedBox(width: 8),
-                              Icon(
-                                Icons.arrow_forward_rounded,
-                                size: 19,
-                                color: Colors.white,
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ),
-        );
-      },
-    );
+(String, String) _topicFromChoice(String id) {
+  switch (id) {
+    case 'topic_fractions':
+      return ('Mathématiques', 'Fractions');
+    case 'topic_multiplication':
+      return ('Mathématiques', 'Multiplication');
+    case 'topic_conjugaison':
+      return ('Français', 'Conjugaison');
+    case 'topic_sciences':
+      return ('Sciences', 'Sciences naturelles');
+    default:
+      return ('Autre', 'Leçon personnalisée');
   }
 }
 
-class _GradientIconCircle extends StatelessWidget {
-  final IconData icon;
-
-  const _GradientIconCircle({required this.icon});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 36,
-      height: 36,
-      decoration: const BoxDecoration(
-        gradient: AppTheme.primaryGradient,
-        shape: BoxShape.circle,
-      ),
-      child: Icon(icon, color: Colors.white, size: 21),
-    );
+String _activityLabel(String activity) {
+  switch (activity) {
+    case 'exercise':
+      return 'Faire un exercice';
+    case 'quiz':
+      return 'Faire un quiz';
+    case 'game':
+      return 'Créer un jeu éducatif';
+    default:
+      return 'Apprendre une leçon';
   }
 }
 
-class _GreetingSection extends StatelessWidget {
-  const _GreetingSection();
-
-  @override
-  Widget build(BuildContext context) {
-    return const Column(
-      children: [
-        Text.rich(
-          TextSpan(
-            children: [
-              TextSpan(text: 'Bonjour '),
-              TextSpan(
-                text: 'Leite',
-                style: TextStyle(color: AppTheme.accent),
-              ),
-              TextSpan(text: ' 👋'),
-            ],
-          ),
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: AppTheme.textPrimary,
-            fontSize: 22,
-            fontWeight: FontWeight.w900,
-          ),
-        ),
-        SizedBox(height: 8),
-        Text(
-          'Qu’allons-nous apprendre aujourd’hui ?',
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: AppTheme.textPrimary,
-            fontSize: 17.5,
-            fontWeight: FontWeight.w900,
-          ),
-        ),
-        SizedBox(height: 8),
-        Text(
-          'Je suis là pour t’aider à comprendre, pratiquer\net progresser à ton rythme.',
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: AppTheme.textSecondary,
-            fontSize: 13.5,
-            height: 1.45,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-      ],
-    );
+String _stageForStep(int step) {
+  switch (step) {
+    case 1:
+      return 'Explication';
+    case 2:
+      return 'Exercice';
+    default:
+      return 'Jeu et quiz';
   }
 }
 
-class _LearningFeatureGrid extends StatelessWidget {
-  final ValueChanged<String> onSelected;
+String _slug(String value) {
+  final result = value
+      .toLowerCase()
+      .replaceAll(RegExp(r'[^a-z0-9à-ÿ]+'), '_')
+      .replaceAll(RegExp(r'^_+|_+$'), '');
+  return result.isEmpty ? 'lesson' : result;
+}
 
-  const _LearningFeatureGrid({required this.onSelected});
+String _subjectFromTopicText(String value) {
+  final text = value.toLowerCase();
+  if (RegExp(r'fraction|calcul|nombre|équation|equation|géométr|geometr|multipli|division')
+      .hasMatch(text)) {
+    return 'Mathématiques';
+  }
+  if (RegExp(r'français|francais|grammaire|conjug|orthographe|rédaction|redaction')
+      .hasMatch(text)) {
+    return 'Français';
+  }
+  if (RegExp(r'anglais|english|vocabulaire anglais').hasMatch(text)) {
+    return 'Anglais';
+  }
+  if (RegExp(r'science|physique|chimie|biologie|svt').hasMatch(text)) {
+    return 'Sciences';
+  }
+  return 'Autre';
+}
 
-  static const _features = <_LearningFeature>[
-    _LearningFeature(
-      emoji: '📖',
-      label: 'Expliquer\nun cours',
-      prompt: 'Explique-moi un cours simplement, avec des exemples.',
-      tint: Color(0xFFF1E9FF),
+List<TutorChoice> _normalizedGameChoices(
+  List<TutorChoice> choices,
+  String activity,
+) {
+  final game = activity.toLowerCase();
+  if (game == 'true_false' || game == 'truefalse' || game == 'vrai_faux') {
+    return const [
+      TutorChoice(id: 'game_true', label: '✅ Vrai', message: 'Vrai'),
+      TutorChoice(id: 'game_false', label: '❌ Faux', message: 'Faux'),
+    ];
+  }
+
+  final filtered = choices.where((choice) {
+    final label = choice.label.toLowerCase().replaceAll('’', "'");
+    return !label.contains("j'ai compris") &&
+        !label.contains('jai compris') &&
+        !label.contains('as-tu compris') &&
+        !label.contains('avez-vous compris');
+  }).take(3).toList(growable: false);
+
+  if (filtered.isNotEmpty) return filtered;
+  return const [
+    TutorChoice(
+      id: 'game_hint',
+      label: '💡 Indice',
+      message: 'Donne un indice court et répète la même question.',
     ),
-    _LearningFeature(
-      emoji: '🧠',
-      label: 'Aide pour un\nexercice',
-      prompt: 'Aide-moi à résoudre un exercice étape par étape.',
-      tint: Color(0xFFFFEEF4),
-    ),
-    _LearningFeature(
-      emoji: '🎮',
-      label: 'Créer un jeu\néducatif',
-      prompt: 'Crée un petit jeu éducatif pour réviser une leçon.',
-      tint: Color(0xFFE9FFF2),
-    ),
-    _LearningFeature(
-      emoji: '📷',
-      label: 'Analyser\nune copie',
-      prompt: 'Aide-moi à analyser et corriger une copie.',
-      tint: Color(0xFFEBF3FF),
-    ),
-    _LearningFeature(
-      emoji: '文',
-      label: 'Traduire en\nMalagasy',
-      prompt: 'Traduis ce que je vais écrire en malagasy.',
-      tint: Color(0xFFFFF7DF),
-    ),
-    _LearningFeature(
-      emoji: '📝',
-      label: 'Générer\nun quiz',
-      prompt: 'Génère-moi un quiz court avec les réponses à la fin.',
-      tint: Color(0xFFE7FFF9),
+    TutorChoice(
+      id: 'game_skip',
+      label: '⏭️ Passer',
+      message: 'Je passe cette question.',
     ),
   ];
+}
 
-  @override
-  Widget build(BuildContext context) {
-    return GridView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      itemCount: _features.length,
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 3,
-        crossAxisSpacing: 10,
-        mainAxisSpacing: 10,
-        childAspectRatio: 1.35,
-      ),
-      itemBuilder: (context, index) {
-        final feature = _features[index];
-        return InkWell(
-          borderRadius: BorderRadius.circular(18),
-          onTap: () => onSelected(feature.prompt),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 10),
-            decoration: BoxDecoration(
-              color: AppTheme.surface,
-              borderRadius: BorderRadius.circular(18),
-              border: Border.all(color: AppTheme.border),
-              boxShadow: AppTheme.softShadow,
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: 34,
-                  height: 34,
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    color: feature.tint,
-                    borderRadius: BorderRadius.circular(11),
-                  ),
-                  child: Text(feature.emoji, style: const TextStyle(fontSize: 20)),
-                ),
-                const SizedBox(width: 7),
-                Expanded(
-                  child: Text(
-                    feature.label,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: AppTheme.textPrimary,
-                      fontSize: 11.5,
-                      height: 1.25,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
+String _decorateGameRound({
+  required String text,
+  required String activity,
+  required int question,
+  bool? previousCorrect,
+}) {
+  final parts = <String>[
+    '## ${_gameEmoji(activity)} ${_gameLabel(activity)}',
+    '**Manche $question sur 2**',
+  ];
+  if (previousCorrect == true) {
+    parts.add('✅ **Bien joué !** Bonne réponse.');
+  } else if (previousCorrect == false) {
+    parts.add('💡 **Presque !** On continue, tu peux te rattraper.');
+  }
+  final body = normalizeTutorMarkdown(text);
+  if (body.isNotEmpty) parts.add(body);
+  return parts.join('\n\n');
+}
+
+String _decorateGameComplete({
+  required String text,
+  required String activity,
+  required int score,
+  required int total,
+  bool? lastCorrect,
+}) {
+  final parts = <String>[
+    '## 🏁 ${_gameLabel(activity)} terminé',
+    if (lastCorrect == true)
+      '✅ **Bonne dernière réponse !**'
+    else if (lastCorrect == false)
+      '💡 **Dernière réponse manquée, mais la partie est terminée.**',
+    '**Score : $score/$total**',
+  ];
+  final body = normalizeTutorMarkdown(text);
+  if (body.isNotEmpty) parts.add(body);
+  parts.add(score == total
+      ? '🌟 Excellent ! Tu maîtrises bien cette notion.'
+      : score > 0
+          ? '👏 Bien joué ! Un nouvel essai peut améliorer ton score.'
+          : '💪 Ce n’est qu’un début. Rejoue pour progresser.');
+  return parts.join('\n\n');
+}
+
+String _gameLabel(String activity) {
+  switch (activity.toLowerCase()) {
+    case 'memory':
+      return 'Mémoire';
+    case 'chrono':
+      return 'Défi chrono';
+    case 'true_false':
+    case 'truefalse':
+    case 'vrai_faux':
+      return 'Vrai ou faux';
+    default:
+      return 'Quiz rapide';
   }
 }
 
-class _LearningFeature {
-  final String emoji;
-  final String label;
-  final String prompt;
-  final Color tint;
-
-  const _LearningFeature({
-    required this.emoji,
-    required this.label,
-    required this.prompt,
-    required this.tint,
-  });
-}
-
-class _TodayDivider extends StatelessWidget {
-  const _TodayDivider();
-
-  @override
-  Widget build(BuildContext context) {
-    return const Row(
-      children: [
-        Expanded(child: Divider(color: AppTheme.border)),
-        Padding(
-          padding: EdgeInsets.symmetric(horizontal: 15),
-          child: Text(
-            'AUJOURD’HUI',
-            style: TextStyle(
-              color: AppTheme.textSecondary,
-              fontSize: 11.5,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.4,
-            ),
-          ),
-        ),
-        Expanded(child: Divider(color: AppTheme.border)),
-      ],
-    );
+String _gameEmoji(String activity) {
+  switch (activity.toLowerCase()) {
+    case 'memory':
+      return '🧠';
+    case 'chrono':
+      return '⏱️';
+    case 'true_false':
+    case 'truefalse':
+    case 'vrai_faux':
+      return '✅❌';
+    default:
+      return '🎯';
   }
 }
 
-class _ConversationPreview extends StatelessWidget {
-  final ValueChanged<String> onQuickReply;
-
-  const _ConversationPreview({required this.onQuickReply});
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        MessageBubble(
-          message: ChatMessage(
-            id: 'preview-user',
-            isUser: true,
-            text: 'Je ne comprends pas les fractions.',
-          ),
-        ),
-        MessageBubble(
-          message: ChatMessage(
-            id: 'preview-assistant',
-            isUser: false,
-            text:
-                'Avant de t’expliquer, peux-tu me dire ce que représente **1/2** ?',
-          ),
-        ),
-        const SizedBox(height: 8),
-        _QuickReplies(onSelected: onQuickReply),
-      ],
-    );
-  }
+bool _isUnderstandingSignal(String value) {
+  final text = value
+      .toLowerCase()
+      .replaceAll('’', "'")
+      .replaceAll(RegExp(r'[^a-zà-ÿ0-9 ]+'), ' ')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
+  return text == "j'ai compris" ||
+      text == 'jai compris' ||
+      text == 'compris' ||
+      text == "c'est clair" ||
+      text == 'c est clair' ||
+      text == 'je comprends' ||
+      text == 'oui compris' ||
+      text == "oui j'ai compris";
 }
 
-class _QuickReplies extends StatelessWidget {
-  final ValueChanged<String> onSelected;
-
-  const _QuickReplies({required this.onSelected});
-
-  @override
-  Widget build(BuildContext context) {
-    const replies = ['C’est la moitié', 'Un nombre décimal', 'Je ne sais pas'];
-
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        children: replies.map((reply) {
-          return InkWell(
-            borderRadius: BorderRadius.circular(20),
-            onTap: () => onSelected(reply),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 9),
-              decoration: BoxDecoration(
-                color: AppTheme.surface,
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(color: const Color(0xFFDCCEFF)),
-              ),
-              child: Text(
-                reply,
-                style: const TextStyle(
-                  color: AppTheme.accentDark,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-            ),
-          );
-        }).toList(),
-      ),
-    );
-  }
-}
-
-class _MpanabeDrawer extends StatelessWidget {
-  final AudioLanguageMode languageMode;
-  final bool voiceConversationEnabled;
-  final ValueChanged<AudioLanguageMode> onLanguageChanged;
-  final VoidCallback onVoiceChanged;
-
-  const _MpanabeDrawer({
-    required this.languageMode,
-    required this.voiceConversationEnabled,
-    required this.onLanguageChanged,
-    required this.onVoiceChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Drawer(
-      backgroundColor: AppTheme.surface,
-      child: SafeArea(
-        child: ListView(
-          padding: const EdgeInsets.fromLTRB(18, 22, 18, 24),
-          children: [
-            Row(
-              children: [
-                SizedBox(
-                  width: 52,
-                  height: 52,
-                  child: Image.asset('assets/images/mascot.png'),
-                ),
-                const SizedBox(width: 10),
-                const Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Mpanabe AI',
-                      style: TextStyle(
-                        fontSize: 21,
-                        fontWeight: FontWeight.w900,
-                        color: AppTheme.textPrimary,
-                      ),
-                    ),
-                    Text(
-                      'Assistant pédagogique offline',
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        color: AppTheme.textSecondary,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-            const SizedBox(height: 28),
-            const Text(
-              'Langue de la conversation vocale',
-              style: TextStyle(
-                color: AppTheme.textSecondary,
-                fontSize: 12,
-                fontWeight: FontWeight.w800,
-              ),
-            ),
-            const SizedBox(height: 8),
-            ...AudioLanguageMode.values.map(
-              (mode) => RadioListTile<AudioLanguageMode>(
-                dense: true,
-                contentPadding: EdgeInsets.zero,
-                activeColor: AppTheme.accent,
-                value: mode,
-                groupValue: languageMode,
-                title: Text(
-                  mode.label,
-                  style: const TextStyle(
-                    color: AppTheme.textPrimary,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                onChanged: (value) {
-                  if (value != null) onLanguageChanged(value);
-                },
-              ),
-            ),
-            const Divider(height: 28),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              activeColor: AppTheme.accent,
-              value: voiceConversationEnabled,
-              title: const Text(
-                'Conversation vocale directe',
-                style: TextStyle(
-                  color: AppTheme.textPrimary,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-              subtitle: const Text(
-                'Mpanabe écoute puis répond à voix haute.',
-                style: TextStyle(
-                  color: AppTheme.textSecondary,
-                  fontSize: 12,
-                ),
-              ),
-              onChanged: (_) => onVoiceChanged(),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+bool _isTokenError(Object error) {
+  final text = '$error'.toLowerCase();
+  return text.contains('token') ||
+      text.contains('2048') ||
+      text.contains('invalid_argument') ||
+      text.contains('input token ids are too long');
 }
