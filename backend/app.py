@@ -3,6 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
+from helpers.db.tutorials_repository import init_db
 
 from apps.urls import router
 
@@ -23,6 +24,8 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
 )
+
+init_db()
 
 
 app.add_middleware(

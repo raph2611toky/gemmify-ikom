@@ -427,3 +427,71 @@ def create_dynamic_tutorial(
             "video_path": None,
             "error": f"Erreur lors de la création du tutoriel : {str(e)}"
         }
+        
+def decide_video_reuse(sujet: str, contexte: str, existing: list[dict]) -> dict:
+    """
+    Demande à Gemma si une vidéo déjà existante (même contexte) correspond
+    assez précisément au nouveau sujet pour être réutilisée, plutôt que
+    de régénérer une vidéo quasi identique.
+
+    Retourne :
+    {"action": "reutiliser_video", "video_id": <id>, "raison": "..."}
+    ou
+    {"action": "creer_video", "video_id": None, "raison": "..."}
+    """
+    if not existing:
+        return {
+            "action": "creer_video",
+            "video_id": None,
+            "raison": "Aucune vidéo existante pour ce contexte."
+        }
+
+    existing_str = "\n".join(
+        f"- id={v['id']} | sujet=\"{v['sujet']}\"" for v in existing
+    )
+
+    system_prompt = (
+        "Tu es un assistant qui décide si une vidéo pédagogique déjà existante "
+        "correspond suffisamment à une nouvelle demande, pour éviter de régénérer "
+        "un contenu quasi identique.\n\n"
+        "Réponds UNIQUEMENT avec un objet JSON, sans texte autour, de la forme :\n"
+        '{"action": "reutiliser_video", "video_id": <id>, "raison": "..."} '
+        "si une vidéo existante correspond clairement au même sujet précis, ou\n"
+        '{"action": "creer_video", "video_id": null, "raison": "..."} '
+        "si aucune vidéo existante ne correspond d'assez près.\n"
+        "Sois strict : ne réutilise que si le sujet précis est vraiment le même "
+        "(pas seulement la même matière/contexte général)."
+    )
+
+    user_prompt = (
+        f"Nouveau sujet demandé : \"{sujet}\"\n"
+        f"Contexte : \"{contexte}\"\n\n"
+        f"Vidéos déjà existantes pour ce contexte :\n{existing_str}\n\n"
+        "Décide : réutiliser une vidéo existante ou en créer une nouvelle."
+    )
+
+    raw = ""
+    try:
+        response = client.chat.completions.create(
+            model="gemma-4-31b-it",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+        )
+        raw     = response.choices[0].message.content
+        cleaned = _clean_json_response(raw)
+        decision = json.loads(cleaned)
+
+        if decision.get("action") not in ("reutiliser_video", "creer_video"):
+            return {"action": "creer_video", "video_id": None, "raison": "Réponse IA invalide."}
+
+        return decision
+
+    except json.JSONDecodeError as e:
+        print(f"[ERREUR JSON] Décision réutilisation invalide : {e}")
+        print(f"[ERREUR JSON] Réponse brute : {raw}")
+        return {"action": "creer_video", "video_id": None, "raison": "Erreur de parsing IA."}
+    except Exception:
+        print(traceback.format_exc())
+        return {"action": "creer_video", "video_id": None, "raison": "Erreur IA."}
