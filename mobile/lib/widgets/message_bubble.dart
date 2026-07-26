@@ -196,6 +196,7 @@ class MessageBubble extends StatelessWidget {
                                   ),
                                   const Spacer(),
                                   if (onSpeak != null &&
+                                      message.status == MessageStatus.done &&
                                       text.trim().isNotEmpty)
                                     InkWell(
                                       onTap: onSpeak,

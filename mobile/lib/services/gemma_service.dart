@@ -295,7 +295,7 @@ class GemmaService {
       temperature: 0.12,
       topK: 8,
       tokenBuffer: 280,
-      maxOutputTokens: 150,
+      maxOutputTokens: 320,
       supportImage: _supportsImageSession,
       supportAudio: _supportsAudioSession,
       supportsFunctionCalls: false,
@@ -307,34 +307,31 @@ class GemmaService {
   }
 
   static const String _systemInstruction = '''
-Tu es Mpanabe AI, professeur attentif, patient et clair pour un élève à Madagascar.
-Adapte uniquement les mots, l'exemple et la difficulté au niveau reçu.
+Tu es Mpanabe AI, professeur clair et patient pour un élève à Madagascar.
+Retourne uniquement UN objet JSON compact, fermé par }, puis arrête.
 
-Retourne uniquement un JSON compact.
-Sans question :
-{"response":"markdown complet","subject":"matière","topic":"sujet","action":"none"}
+Sans choix :
+{"response":"texte","subject":"matière","topic":"sujet","action":"none"}
 Avec choix :
-{"response":"question courte","choices":["choix 1","choix 2"],"subject":"matière","topic":"sujet","action":"wait_answer"}
-Après une vraie réponse évaluée, ajoute le champ optionnel :
-{"evaluation":{"skill":"compétence courte","correct":true}}
+{"response":"question","choices":["choix 1","choix 2"],"subject":"matière","topic":"sujet","action":"wait_answer"}
+Après une réponse évaluée, ajoute éventuellement :
+{"evaluation":{"skill":"compétence","correct":true}}
 
-Règles :
-- response : 30 à 55 mots, complète, claire, Markdown simple, aucun antislash visible.
-- Explique une seule idée avec un exemple concret, puis une courte question si utile.
-- Exercice : un seul exercice guidé, 3 choix maximum.
-- Jeu/quiz : exactement 2 petites questions, une seule question affichée à la fois.
-- Dans un jeu, sois dynamique : emoji, numéro de manche et encouragement bref.
-- N'écris jamais « Étape 1 », « Étape 2 » ou « Étape 3 ». Utilise directement les titres « Explication », « Exercice » ou « Jeu et quiz ».
-- Quiz et défi chrono : fournis toujours 2 ou 3 choix dans `choices`.
-- Vrai ou faux : fournis toujours exactement ["Vrai","Faux"].
-- Mémoire : propose une association courte avec 2 ou 3 choix.
-- Après la réponse à la question 1, corrige en une phrase puis donne immédiatement la question 2 avec ses choix.
-- Après la question 2, donne seulement le score final et un encouragement. Ne demande jamais « as-tu compris ? » et ne propose jamais « J’ai compris » dans un jeu.
-- Si la réponse est fausse, corrige simplement et mets correct=false.
-- Si elle est juste, mets correct=true. Les notes, la maîtrise et les points sont calculés localement.
-- Omet choices quand il n'y a aucun choix. Omet evaluation tant qu'aucune réponse n'est évaluée.
-- subject : Mathématiques, Français, Anglais, Sciences ou Autre. topic : chapitre précis.
-- Aucun nom d'étudiant, aucun champ vide, aucun ui, card, lesson, memory ou function_call.
+Règles obligatoires :
+- Respecte `language_rule`. Utilise seulement le français ou le malagasy en alphabet latin. Jamais d'autre langue ni d'autre écriture.
+- `response` doit être complète, simple et courte : respecte `response_limit_words`.
+- Explication : une seule idée et un seul exemple.
+- Exercice initial : une seule question, sans donner la solution.
+- Ne recopie jamais les choix dans `response`; mets-les seulement dans `choices`.
+- Les choix doivent être courts, distincts et au nombre de 2 ou 3.
+- Jeu/quiz : 2 manches, une seule question affichée à la fois.
+- Vrai/faux : exactement ["Vrai","Faux"].
+- Après la manche 1 : correction en une phrase puis manche 2.
+- Après la manche 2 : score final et encouragement, sans nouvelle question.
+- N'écris jamais Étape 1, Étape 2 ou Étape 3.
+- Omet `choices` sans question. Omet `evaluation` sans réponse évaluée.
+- Les scores, points et niveaux sont calculés localement.
+- Aucun texte avant ou après le JSON.
 ''';
 
   static String _audioInstruction(AudioLanguageMode mode) {
@@ -342,9 +339,21 @@ Règles :
       case AudioLanguageMode.malagasy:
         return 'Valio amin’ny teny malagasy. Aza aseho ny transcription.';
       case AudioLanguageMode.mixed:
-        return 'Réponds naturellement en malagasy ou en français sans transcription.';
+        return 'Réponds en malagasy ou en français selon le message, sans transcription.';
       case AudioLanguageMode.french:
         return 'Réponds en français clair sans afficher la transcription.';
+    }
+  }
+
+  static String _responseLanguageInstruction(AudioLanguageMode mode) {
+    switch (mode) {
+      case AudioLanguageMode.malagasy:
+        return 'Réponds uniquement en malagasy avec l’alphabet latin.';
+      case AudioLanguageMode.mixed:
+        return 'Réponds dans la langue du message, uniquement en français ou '
+            'en malagasy avec l’alphabet latin. N’utilise aucune autre langue.';
+      case AudioLanguageMode.french:
+        return 'Réponds uniquement en français avec l’alphabet latin.';
     }
   }
 
@@ -390,6 +399,7 @@ Règles :
     Uint8List? imageBytes,
     Uint8List? audioBytes,
     AudioLanguageMode languageMode = AudioLanguageMode.mixed,
+    void Function(String text)? onPartialResponse,
   }) async {
     if (_isGenerating) {
       throw StateError('Une réponse est déjà en cours de génération.');
@@ -419,6 +429,7 @@ Règles :
         audioBytes: audioBytes,
         languageMode: languageMode,
         hydrate: rebuilt || !_sessionHydrated,
+        onPartialResponse: onPartialResponse,
       );
       return _validateProgress(response, answerCanBeEvaluated);
     } finally {
@@ -435,6 +446,7 @@ Règles :
     required bool hydrate,
     Uint8List? imageBytes,
     Uint8List? audioBytes,
+    void Function(String text)? onPartialResponse,
   }) async {
     final isMultimodal = imageBytes != null || audioBytes != null;
     final context = hydrate
@@ -460,7 +472,13 @@ Règles :
     final envelope = jsonEncode({
       'message': normalizedText,
       if (student.isNotEmpty) 'student': student,
+      'language_rule': _responseLanguageInstruction(languageMode),
       if (audioBytes != null) 'audio_rule': _audioInstruction(languageMode),
+      'response_limit_words': _responseWordLimit(
+        activeLesson,
+        answerCanBeEvaluated,
+        hasImage: imageBytes != null,
+      ),
       if (activeLesson.isActive)
         'lesson': {
           'subject': _clip(activeLesson.subject, 30),
@@ -480,7 +498,11 @@ Règles :
       if (progress['skills'] is List &&
           (progress['skills'] as List).isNotEmpty)
         'progress': progress,
-      'task': _taskFor(activeLesson, answerCanBeEvaluated),
+      'task': _taskFor(
+        activeLesson,
+        answerCanBeEvaluated,
+        hasImage: imageBytes != null,
+      ),
     });
 
     final serial = ++_requestSerial;
@@ -492,7 +514,41 @@ Règles :
         activeLesson: activeLesson,
         imageBytes: imageBytes,
         audioBytes: audioBytes,
+        onPartialResponse: onPartialResponse,
       );
+
+      // Un JSON coupé ne doit plus enfermer l'utilisateur dans une boucle
+      // « Reprendre ». On effectue un seul rattrapage automatique et compact.
+      if (response.wasTruncated) {
+        // Ne jamais effacer le texte déjà visible pendant le rattrapage.
+        // Le second flux remplacera progressivement l'ancien seulement
+        // lorsqu'un nouveau texte utile sera réellement disponible.
+        final compactPayload = Map<String, dynamic>.from(
+          jsonDecode(envelope) as Map,
+        );
+        compactPayload
+          ..remove('summary')
+          ..remove('recent_same_chat')
+          ..remove('progress')
+          ..['response_limit_words'] = 24
+          ..['task'] =
+              '${_taskFor(activeLesson, answerCanBeEvaluated, hasImage: imageBytes != null)} '
+              'Rattrapage unique : réponse complète en 16 à 24 mots. '
+              'JSON minimal, valide et fermé immédiatement.'
+          ..['compact_retry'] = true;
+
+        response = await _runGeneration(
+          serial: serial,
+          envelope: jsonEncode(compactPayload),
+          activeLesson: activeLesson,
+          imageBytes: imageBytes,
+          audioBytes: audioBytes,
+          onPartialResponse: (text) {
+            if (text.trim().isNotEmpty) onPartialResponse?.call(text);
+          },
+        );
+      }
+
       final inferredSubject = activeLesson.subject.trim().isNotEmpty
           ? activeLesson.subject
           : _inferSubject(normalizedText);
@@ -522,6 +578,7 @@ Règles :
     required LessonState activeLesson,
     Uint8List? imageBytes,
     Uint8List? audioBytes,
+    void Function(String text)? onPartialResponse,
   }) async {
     final chat = _chat;
     if (chat == null) throw StateError('La session Gemma est indisponible.');
@@ -547,9 +604,21 @@ Règles :
     _ensureActive(serial);
 
     final buffer = StringBuffer();
+    var lastPartial = '';
     await for (final item in chat.generateChatResponseAsync()) {
       _ensureActive(serial);
-      if (item is TextResponse) buffer.write(item.token);
+      if (item is! TextResponse) continue;
+      buffer.write(item.token);
+
+      // Gemma renvoie du JSON. On n'affiche que la valeur de `response`,
+      // jamais les accolades ou les champs techniques.
+      final partial = _sanitizeStreamingPreview(
+        _extractPartialResponse(buffer.toString()),
+      );
+      if (partial.isNotEmpty && partial != lastPartial) {
+        lastPartial = partial;
+        onPartialResponse?.call(partial);
+      }
     }
     _ensureActive(serial);
     _turnsInSession++;
@@ -606,35 +675,197 @@ Règles :
   }
 }
 
-String _taskFor(LessonState lesson, bool answerExpected) {
+
+int _responseWordLimit(
+  LessonState lesson,
+  bool answerExpected, {
+  bool hasImage = false,
+}) {
+  if (hasImage) return 55;
+  if (!lesson.isActive) return 45;
+  if (lesson.step <= 1) return answerExpected ? 35 : 45;
+  if (lesson.step == 2) return answerExpected ? 35 : 25;
+  // Les jeux doivent rester très courts pour laisser assez de place au JSON
+  // complet, même sur les appareils lents.
+  return answerExpected ? 24 : 20;
+}
+
+/// Empêche l'affichage de scripts inattendus pendant le flux (le modèle
+/// local peut parfois dériver vers une autre écriture). Le résultat final
+/// reste validé par le parseur JSON.
+String _sanitizeStreamingPreview(String value) {
+  if (value.isEmpty) return '';
+
+  final output = StringBuffer();
+  for (final rune in value.runes) {
+    final allowed = rune == 0x0A ||
+        rune == 0x0D ||
+        rune == 0x09 ||
+        (rune >= 0x20 && rune <= 0x7E) ||
+        (rune >= 0x00A0 && rune <= 0x024F) ||
+        (rune >= 0x2000 && rune <= 0x206F) ||
+        (rune >= 0x2190 && rune <= 0x22FF) ||
+        (rune >= 0x1F000 && rune <= 0x1FAFF);
+    if (allowed) output.writeCharCode(rune);
+  }
+
+  return output
+      .toString()
+      .replaceAll(RegExp(r'[ \t]+\n'), '\n')
+      .replaceAll(RegExp(r'\n{3,}'), '\n\n')
+      .trimRight();
+}
+
+String _taskFor(
+  LessonState lesson,
+  bool answerExpected, {
+  bool hasImage = false,
+}) {
+  if (hasImage && !lesson.isActive) {
+    return 'Observe attentivement l’image. Si elle montre un devoir ou un '
+        'exercice déjà rempli, corrige-le précisément : indique ce qui est '
+        'juste, ce qui est faux, donne la bonne réponse et une note seulement '
+        'si un barème est visible. Si l’image contient uniquement un énoncé '
+        'ou un cours, identifie la matière puis explique sans inventer.';
+  }
+
+  if (hasImage && lesson.isActive) {
+    return answerExpected
+        ? 'Considère l’image comme la réponse de l’élève à l’étape en cours. '
+            'Lis ce qui est visible, corrige précisément, explique l’erreur '
+            'éventuelle et évalue uniquement ce que l’image permet de vérifier.'
+        : 'Observe l’image dans le contexte de la leçon. Si elle contient une '
+            'réponse déjà rédigée, corrige-la; sinon explique l’énoncé visible '
+            'et poursuis l’étape actuelle sans inventer de contenu.';
+  }
+
   if (!lesson.isActive) {
-    return 'Identifie la matière et le sujet. Explique clairement comme un professeur attentif. Si la demande est un exercice, crée un exercice; si c’est un jeu ou quiz, limite-le à 2 questions.';
+    return 'Identifie la matière et le sujet. Explique clairement comme un '
+        'professeur attentif. Si la demande est un exercice, crée un exercice; '
+        'si c’est un jeu ou quiz, limite-le à 2 questions.';
   }
   if (lesson.step <= 1) {
     return answerExpected
-        ? 'Évalue cette réponse. Si elle est correcte, félicite brièvement et demande de passer à l’exercice. Sinon réexplique plus simplement avec une nouvelle petite question.'
-        : 'Explication : explique une idée avec un exemple adapté au niveau, puis pose une seule petite question avec 2 ou 3 choix. N’écris aucun numéro d’étape.';
+        ? 'Évalue cette réponse. Si elle est correcte, félicite brièvement et '
+            'demande de passer à l’exercice. Sinon réexplique plus simplement '
+            'avec une nouvelle petite question.'
+        : 'Explication : explique une seule idée avec un exemple très court. '
+            'Puis pose une seule question avec 2 ou 3 choix distincts. '
+            'Ne répète pas les choix dans le texte et ne numérote aucune étape.';
   }
   if (lesson.step == 2) {
     return answerExpected
-        ? 'Évalue l’exercice. Bonne réponse : félicite et annonce le jeu. Erreur : montre l’erreur puis propose un exercice plus simple.'
-        : 'Exercice : propose un seul exercice guidé avec 3 choix maximum. N’écris aucun numéro d’étape.';
+        ? 'Évalue l’exercice. Bonne réponse : félicite et annonce le jeu. '
+            'Erreur : montre l’erreur puis propose un exercice plus simple.'
+        : 'Exercice : donne uniquement un seul énoncé court à résoudre, '
+            'sans solution ni correction. Ajoute 2 ou 3 choix distincts dans '
+            'le champ choices seulement. Ne répète pas les choix dans response.';
   }
   final current = lesson.gameQuestion <= 0 ? 1 : lesson.gameQuestion;
+  final differentRound = current > 1
+      ? 'La nouvelle question doit être différente de la manche précédente. '
+      : '';
   final game = switch (lesson.activity.toLowerCase()) {
     'true_false' || 'truefalse' || 'vrai_faux' =>
-      'Vrai ou faux : une affirmation courte et exactement les choix Vrai/Faux.',
-    'memory' =>
-      'Jeu mémoire : une association courte avec 2 ou 3 choix.',
+      '${differentRound}Vrai ou faux : une affirmation courte et exactement les choix Vrai/Faux.',
+    'memory' => '${differentRound}Jeu mémoire : une association courte avec 2 ou 3 choix.',
     'chrono' =>
-      'Défi chrono : question très courte, ton énergique et 2 ou 3 choix.',
-    _ => 'Quiz rapide : question courte et 2 ou 3 choix.',
+      '${differentRound}Défi chrono : question très courte, ton énergique et 2 ou 3 choix.',
+    _ => '${differentRound}Quiz rapide : question courte et 2 ou 3 choix.',
   };
   return answerExpected
       ? current >= lesson.gameTotal
-          ? 'Évalue la question finale. Donne un score sur ${lesson.gameTotal}, un encouragement bref et termine. Aucun choix, aucune troisième question, aucune demande de compréhension.'
-          : 'Évalue la question $current sur ${lesson.gameTotal} en une phrase, puis affiche immédiatement la question ${current + 1} sur ${lesson.gameTotal}. $game Ne demande jamais si l’élève a compris.'
-      : 'Jeu et quiz, question $current sur ${lesson.gameTotal}. $game Ajoute un emoji et un titre de manche. Ne propose jamais « J’ai compris » et n’écris aucun numéro d’étape.';
+          ? 'Évalue la question finale. Donne un score sur ${lesson.gameTotal}, '
+              'un encouragement bref et termine. Aucun choix, aucune troisième '
+              'question, aucune demande de compréhension.'
+          : 'Évalue la question $current sur ${lesson.gameTotal} en une phrase, '
+              'puis affiche immédiatement une question ${current + 1} sur '
+              '${lesson.gameTotal}, différente de la précédente. $game '
+              'Ne demande jamais si l’élève a compris.'
+      : 'Jeu et quiz, question $current sur ${lesson.gameTotal}. $game Ajoute '
+          'un emoji et un titre de manche. Ne propose jamais « J’ai compris » '
+          'et n’écris aucun numéro d’étape.';
+}
+
+/// Extrait progressivement le texte du champ JSON `response`.
+///
+/// La génération locale fournit des morceaux de JSON. Cette fonction décode
+/// les échappements déjà complets et ignore silencieusement une séquence
+/// inachevée en fin de flux.
+String _extractPartialResponse(String raw) {
+  final marker = RegExp(r'"response"\s*:\s*"');
+  final match = marker.firstMatch(raw);
+  if (match == null) return '';
+
+  final output = StringBuffer();
+  var index = match.end;
+  while (index < raw.length) {
+    final char = raw[index];
+    if (char == '"') break;
+    if (char != '\\') {
+      output.write(char);
+      index++;
+      continue;
+    }
+
+    if (index + 1 >= raw.length) break;
+    final escaped = raw[index + 1];
+    if (escaped == 'n') {
+      output.write('\n');
+      index += 2;
+      continue;
+    }
+    if (escaped == 'r') {
+      output.write('\r');
+      index += 2;
+      continue;
+    }
+    if (escaped == 't') {
+      output.write('\t');
+      index += 2;
+      continue;
+    }
+    if (escaped == 'b') {
+      output.write('\b');
+      index += 2;
+      continue;
+    }
+    if (escaped == 'f') {
+      output.write('\f');
+      index += 2;
+      continue;
+    }
+    if (escaped == '"') {
+      output.write('"');
+      index += 2;
+      continue;
+    }
+    if (escaped == '\\') {
+      output.write('\\');
+      index += 2;
+      continue;
+    }
+    if (escaped == '/') {
+      output.write('/');
+      index += 2;
+      continue;
+    }
+    if (escaped == 'u') {
+      if (index + 6 > raw.length) return output.toString();
+      final hex = raw.substring(index + 2, index + 6);
+      final codePoint = int.tryParse(hex, radix: 16);
+      if (codePoint == null) return output.toString();
+      output.writeCharCode(codePoint);
+      index += 6;
+      continue;
+    }
+
+    // Le modèle peut exceptionnellement produire un échappement non JSON.
+    // On conserve le caractère utile au lieu d'afficher l'antislash.
+    output.write(escaped);
+    index += 2;
+  }
+  return output.toString();
 }
 
 String _clip(String value, int maxLength) {
